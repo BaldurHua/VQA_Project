@@ -5,3 +5,7 @@ data/
 *.json
 *.h5
 *.jpg
+
+# Ignore saved models & checkpoints
+*.pt
+checkpoints/
