@@ -1,0 +1,7 @@
+# Ignore dataset files
+data/
+*.pkl
+*.npy
+*.json
+*.h5
+*.jpg

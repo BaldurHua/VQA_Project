@@ -1,0 +1,12 @@
+Epoch 1	Loss: 3.9370	Acc: 0.0000
+Epoch 2	Loss: 3.9324	Acc: 0.0000
+Epoch 3	Loss: 3.9338	Acc: 0.0000
+Epoch 1	Loss: 3.2538	Acc: 0.5189
+Epoch 2	Loss: 3.0571	Acc: 0.5017
+Epoch 3	Loss: 2.9578	Acc: 0.4908
+Epoch 4	Loss: 2.8543	Acc: 0.4661
+Epoch 5	Loss: 2.7743	Acc: 0.4369
+Epoch 6	Loss: 2.7020	Acc: 0.4385
+Epoch 7	Loss: 2.6475	Acc: 0.4239
+Epoch 8	Loss: 2.5880	Acc: 0.4180
+Epoch 9	Loss: 2.5497	Acc: 0.4236
