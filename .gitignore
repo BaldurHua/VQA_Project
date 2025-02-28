@@ -1,5 +1,4 @@
 # Ignore dataset files
-data/
 *.pkl
 *.npy
 *.json
