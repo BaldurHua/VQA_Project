@@ -178,14 +178,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# def init_weights(m):
+#     if isinstance(m, (nn.Conv2d, nn.Linear)):
+#         nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+#         if m.bias is not None:
+#             nn.init.constant_(m.bias, 0)
+#     elif isinstance(m, nn.BatchNorm2d):
+#         nn.init.constant_(m.weight, 1)
+#         nn.init.constant_(m.bias, 0)
+
 def init_weights(m):
-    if isinstance(m, (nn.Conv2d, nn.Linear)):
-        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+    if isinstance(m, nn.Linear):
+        if isinstance(m, nn.Linear) and m.weight.shape[0] < 2048:
+            nn.init.xavier_uniform_(m.weight)  
+        else:
+            nn.init.kaiming_uniform_(m.weight, nonlinearity='relu') 
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
+    
+    elif isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+
     elif isinstance(m, nn.BatchNorm2d):
         nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)
+
 
 
 class InceptionModule(nn.Module):
@@ -304,15 +323,48 @@ class ResIncepEncoder(nn.Module):
 
 
 # In[130]:
+import gensim.downloader as api
 
+glove_model = api.load("glove-wiki-gigaword-300") 
 
 class QstEncoder(nn.Module):
-    def __init__(self, qst_vocab_size, word_embed_size, embed_size, num_layers=2, hidden_size=256):
+    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
         super(QstEncoder, self).__init__()
-        self.word2vec = nn.Embedding(qst_vocab_size, word_embed_size)
+
+        self.word_embed_size = word_embed_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Pretrained GloVe embeddings instead of randomized the embedding
+        vocab_size = qst_vocab.vocab_size
+        embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+
+        for word, idx in qst_vocab.word2idx_dict.items(): 
+            # if idx % 500 == 0: 
+            #     print(f"Processing word {idx}/{qst_vocab.vocab_size}: {word}")
+
+            if word in glove_model.key_to_index:
+                embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
+            else:
+                embedding_matrix[idx] = torch.randn(word_embed_size) * 0.1
+
+        for word in ["<pad>", "<unk>"]:
+            if word in qst_vocab.word2idx_dict:
+                idx = qst_vocab.word2idx_dict[word]
+                embedding_matrix[idx] = torch.zeros(word_embed_size)  # Assign zero embeddings for padding
+ 
+        
+        # missing_words = [word for word in qst_vocab.word_list if word.lower() not in glove_model.key_to_index]
+        # print(f"Missing words: {missing_words[:10]} (Total missing: {len(missing_words)})")
+
+        # Embedding layer
+        self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
+        print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
+
+        # LSTM 
         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
-        self.norm = nn.LayerNorm(embed_size) 
+        self.norm = nn.LayerNorm(embed_size)
         self.tanh = nn.Tanh()
 
     def forward(self, question):
@@ -322,7 +374,7 @@ class QstEncoder(nn.Module):
         hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
 
         qst_feature = self.tanh(self.fc(hidden))  
-        qst_feature = self.norm(qst_feature) 
+        qst_feature = self.norm(qst_feature)
         return qst_feature
 
 
@@ -355,18 +407,16 @@ class Attention(nn.Module):
 # In[132]:
 
 class SANModel(nn.Module):
-    def __init__(self, embed_size, qst_vocab_size, ans_vocab_size, word_embed_size, num_layers, hidden_size):
+    def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
         super(SANModel, self).__init__()
-        self.num_attention_layer = 2
+        self.num_attention_layer = 4
 
-        # Encoders
+        # Image Encoder
         self.img_encoder = ResIncepEncoder(embed_size)
-        self.qst_encoder = QstEncoder(qst_vocab_size, word_embed_size, embed_size, num_layers, hidden_size)
-
-        # Attention Layers
+        self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
         self.san = nn.ModuleList([Attention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
 
-        # MLP 
+        # MLP
         self.mlp = nn.Sequential(
             nn.Linear(embed_size, 1024),
             nn.ReLU(),
@@ -382,7 +432,7 @@ class SANModel(nn.Module):
         img_feature = self.img_encoder(img)  
         qst_feature = self.qst_encoder(qst) 
 
-        # Apply Stacked Attention
+        # Stacked Attention
         u = qst_feature
         for attn_layer in self.san:
             u = attn_layer(img_feature, u)
@@ -391,8 +441,10 @@ class SANModel(nn.Module):
         return combined_feature
 
 
+
 # In[ ]:
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import Subset
 import torch.optim as optim
 import time
 
@@ -400,13 +452,19 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
+
+    # ratio = 0.3  
+    # subset_size = int(len(train_dataset) * ratio)  
+    # indices = np.random.choice(len(train_dataset), subset_size, replace=False)
+    # train_subdataset = Subset(train_dataset, indices)
+    # train_loader = DataLoader(train_subdataset, batch_size=16, shuffle=True, num_workers=0, pin_memory=True)
 
     val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
@@ -416,12 +474,15 @@ def train():
     qst_vocab_size = train_dataset.qst_vocab.vocab_size
     ans_vocab_size = train_dataset.ans_vocab.vocab_size
     ans_unk_idx = train_dataset.ans_vocab.unk2idx
+    # qst_vocab_size = train_subdataset.dataset.qst_vocab.vocab_size
+    # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
+    # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SANModel(
-            embed_size=1024,
-            qst_vocab_size=qst_vocab_size,
+            embed_size=512, # tune
+            qst_vocab=VocabDict('C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed/vocab_questions.txt'),
             ans_vocab_size=ans_vocab_size,
             word_embed_size=300,
             num_layers=2,
@@ -430,10 +491,14 @@ def train():
     model.apply(init_weights)
 
     model.to(device)
+    # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
+
+
+    # model = torch.compile(model)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.1, patience=10)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.5, patience=2)
 
     last_time = 0
     early_stop_threshold = 3
@@ -445,6 +510,7 @@ def train():
     save_step = 1
     batch_size = 32
 
+    print("Starting training...")
     for epoch in range(num_epochs):
         if stop_training:
             print(f"Early stopping triggered at epoch {epoch+1}")
@@ -472,6 +538,8 @@ def train():
                     output = model(image, question)
                     # print("Model Output Shape:", output.shape)
                     # print("Label Shape:", label.shape)
+                    # print("Output Sample:", output[:10])
+                    # print("Prediction:", output.argmax(dim=1)[:10])
 
                     _, pred = torch.max(output, 1)
                     # print("Predictions vs Labels:", pred[:10], label[:10])
@@ -489,7 +557,7 @@ def train():
                 if len(multi_choice) == 0:
                     multi_choice = torch.zeros((pred.size(0), 1), dtype=torch.long).to(device)
                 else:
-                    multi_choice = torch.tensor(multi_choice, dtype=torch.long).to(device)
+                    multi_choice = multi_choice.clone().detach().to(device)
 
                 if multi_choice.dim() == 1:
                     multi_choice = multi_choice.unsqueeze(0)
