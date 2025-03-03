@@ -452,31 +452,31 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
+    # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
 
-    # ratio = 0.3  
-    # subset_size = int(len(train_dataset) * ratio)  
-    # indices = np.random.choice(len(train_dataset), subset_size, replace=False)
-    # train_subdataset = Subset(train_dataset, indices)
-    # train_loader = DataLoader(train_subdataset, batch_size=16, shuffle=True, num_workers=0, pin_memory=True)
+    ratio = 0.3  
+    subset_size = int(len(train_dataset) * ratio)  
+    indices = np.random.choice(len(train_dataset), subset_size, replace=False)
+    train_subdataset = Subset(train_dataset, indices)
+    train_loader = DataLoader(train_subdataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
 
     val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
 
-    train_dataset = train_loader.dataset
+    # train_dataset = train_loader.dataset
 
-    qst_vocab_size = train_dataset.qst_vocab.vocab_size
-    ans_vocab_size = train_dataset.ans_vocab.vocab_size
-    ans_unk_idx = train_dataset.ans_vocab.unk2idx
-    # qst_vocab_size = train_subdataset.dataset.qst_vocab.vocab_size
-    # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
-    # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
+    # qst_vocab_size = train_dataset.qst_vocab.vocab_size
+    # ans_vocab_size = train_dataset.ans_vocab.vocab_size
+    # ans_unk_idx = train_dataset.ans_vocab.unk2idx
+    qst_vocab_size = train_subdataset.dataset.qst_vocab.vocab_size
+    ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
+    ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -492,13 +492,12 @@ def train():
 
     model.to(device)
     # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
-
-
+    
     # model = torch.compile(model)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.5, patience=2)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
 
     last_time = 0
     early_stop_threshold = 3
@@ -508,7 +507,6 @@ def train():
     prev_loss = 9999
     num_epochs = 10
     save_step = 1
-    batch_size = 32
 
     print("Starting training...")
     for epoch in range(num_epochs):
@@ -522,7 +520,12 @@ def train():
 
             running_loss = 0.0
             running_corr = 0
-            model.train() if phase == 'train' else model.eval()
+
+            if phase == 'train':
+                model.train()
+            else:
+                model.eval()
+
 
             last_time = time.time()
 
@@ -530,7 +533,7 @@ def train():
                 image = batch_sample['image'].to(device)
                 question = batch_sample['question'].to(device)
                 label = batch_sample['answer_label'].to(device)
-                multi_choice = batch_sample['answer_multi_choice']
+                # multi_choice = batch_sample['answer_multi_choice']
 
                 optimizer.zero_grad()
 
@@ -554,16 +557,17 @@ def train():
                         optimizer.step()
 
                 # Accuracy handling
-                if len(multi_choice) == 0:
-                    multi_choice = torch.zeros((pred.size(0), 1), dtype=torch.long).to(device)
-                else:
-                    multi_choice = multi_choice.clone().detach().to(device)
+                # if len(multi_choice) == 0:
+                #     multi_choice = torch.zeros((pred.size(0), 1), dtype=torch.long).to(device)
+                # else:
+                #     multi_choice = multi_choice.clone().detach().to(device)
 
-                if multi_choice.dim() == 1:
-                    multi_choice = multi_choice.unsqueeze(0)
+                # if multi_choice.dim() == 1:
+                #     multi_choice = multi_choice.unsqueeze(0)
 
-                running_corr += (multi_choice == pred.unsqueeze(1)).any(dim=1).sum().item()
-                running_loss += loss.item()
+                correct_predictions = (pred == label).sum().item()
+                running_corr += correct_predictions
+                running_loss += loss.item() * image.size(0)
 
                 # Print periodically for progress
                 if batch_idx % 100 == 0 and batch_idx > 0:
@@ -575,7 +579,7 @@ def train():
                           f'Estimated time left: {estimated_time/3600:.2f} hr')
                     last_time = time.time()
 
-            epoch_loss = running_loss / len(dataloader)
+            epoch_loss = running_loss / dataset_size
             epoch_acc = running_corr / dataset_size
 
             print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
@@ -588,7 +592,7 @@ def train():
 
             # Validation
             if phase == 'valid':
-                scheduler.step(epoch_acc)  
+                scheduler.step(epoch_loss)  
 
                 if epoch_loss < best_loss:
                     best_loss = epoch_loss
