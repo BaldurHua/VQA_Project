@@ -12,16 +12,13 @@ class DummyDataset(Dataset):
         return self.size
 
     def __getitem__(self, idx):
-        print(f"🔹 Process {os.getpid()} fetching index {idx}", flush=True)
-
-        # 🔹 Catch any potential crashes
+        print(f"Process {os.getpid()} fetching index {idx}", flush=True)
         try:
             return idx
         except Exception as e:
-            print(f"🚨 Worker Error: {e}")
+            print(f"Worker Error: {e}")
             return -1 
         
-# Windows multiprocessing fix
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn", force=True)
 
@@ -31,8 +28,8 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=10, shuffle=True, num_workers=2)
 
     for batch in dataloader:
-        print(f"✅ Batch: {batch}")
-        break  # Test only the first batch
+        print(f"Batch: {batch}")
+        break  
 
 
 # %%

@@ -327,6 +327,23 @@ import gensim.downloader as api
 
 glove_model = api.load("glove-wiki-gigaword-300") 
 
+def build_embedding_matrix(qst_vocab, word_embed_size):
+    vocab_size = qst_vocab.vocab_size
+    embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+
+    for word, idx in qst_vocab.word2idx_dict.items():
+        if word in glove_model.key_to_index:
+            embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
+        else:
+            torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
+
+    # Set padding & unknown words to zero
+    for word in ["<pad>", "<unk>"]:
+        if word in qst_vocab.word2idx_dict:
+            embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
+    
+    return embedding_matrix
+
 class QstEncoder(nn.Module):
     def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
         super(QstEncoder, self).__init__()
@@ -335,47 +352,78 @@ class QstEncoder(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
 
-        # Pretrained GloVe embeddings instead of randomized the embedding
-        vocab_size = qst_vocab.vocab_size
-        embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+        # pass the precomputed embedding matrix
+        embedding_matrix = build_embedding_matrix(qst_vocab, word_embed_size)
 
-        for word, idx in qst_vocab.word2idx_dict.items(): 
-            # if idx % 500 == 0: 
-            #     print(f"Processing word {idx}/{qst_vocab.vocab_size}: {word}")
-
-            if word in glove_model.key_to_index:
-                embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
-            else:
-                embedding_matrix[idx] = torch.randn(word_embed_size) * 0.1
-
-        for word in ["<pad>", "<unk>"]:
-            if word in qst_vocab.word2idx_dict:
-                idx = qst_vocab.word2idx_dict[word]
-                embedding_matrix[idx] = torch.zeros(word_embed_size)  # Assign zero embeddings for padding
- 
-        
-        # missing_words = [word for word in qst_vocab.word_list if word.lower() not in glove_model.key_to_index]
-        # print(f"Missing words: {missing_words[:10]} (Total missing: {len(missing_words)})")
-
-        # Embedding layer
+        # Embedding layer 
         self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
 
-        # LSTM 
+        # LSTM Encoder
         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
         self.norm = nn.LayerNorm(embed_size)
         self.tanh = nn.Tanh()
 
     def forward(self, question):
-        qst_vec = self.word2vec(question)  
-        qst_vec, (hidden, _) = self.lstm(qst_vec)  
+          qst_vec = self.word2vec(question)  
+          qst_vec, (hidden, _) = self.lstm(qst_vec)  
+  
+          hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
+  
+          qst_feature = self.tanh(self.fc(hidden))  
+          qst_feature = self.norm(qst_feature)
+          return qst_feature
 
-        hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
 
-        qst_feature = self.tanh(self.fc(hidden))  
-        qst_feature = self.norm(qst_feature)
-        return qst_feature
+# class QstEncoder(nn.Module):
+#     def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
+#         super(QstEncoder, self).__init__()
+
+#         self.word_embed_size = word_embed_size
+#         self.hidden_size = hidden_size
+#         self.num_layers = num_layers
+
+#         # Pretrained GloVe embeddings instead of randomized the embedding
+#         vocab_size = qst_vocab.vocab_size
+#         embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+
+#         for word, idx in qst_vocab.word2idx_dict.items(): 
+#             # if idx % 500 == 0: 
+#             #     print(f"Processing word {idx}/{qst_vocab.vocab_size}: {word}")
+
+#             if word in glove_model.key_to_index:
+#                 embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
+#             else:
+#                 embedding_matrix[idx] = torch.randn(word_embed_size) * 0.1
+
+#         for word in ["<pad>", "<unk>"]:
+#             if word in qst_vocab.word2idx_dict:
+#                 idx = qst_vocab.word2idx_dict[word]
+#                 embedding_matrix[idx] = torch.zeros(word_embed_size)  # Assign zero embeddings for padding
+        
+#         # missing_words = [word for word in qst_vocab.word_list if word.lower() not in glove_model.key_to_index]
+#         # print(f"Missing words: {missing_words[:10]} (Total missing: {len(missing_words)})")
+
+#         # Embedding layer
+#         self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
+#         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
+
+#         # LSTM 
+#         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+#         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
+#         self.norm = nn.LayerNorm(embed_size)
+#         self.tanh = nn.Tanh()
+
+#     def forward(self, question):
+#         qst_vec = self.word2vec(question)  
+#         qst_vec, (hidden, _) = self.lstm(qst_vec)  
+
+#         hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
+
+#         qst_feature = self.tanh(self.fc(hidden))  
+#         qst_feature = self.norm(qst_feature)
+#         return qst_feature
 
 
 # In[131]:
@@ -452,31 +500,31 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
-    ratio = 0.3  
-    subset_size = int(len(train_dataset) * ratio)  
-    indices = np.random.choice(len(train_dataset), subset_size, replace=False)
-    train_subdataset = Subset(train_dataset, indices)
-    train_loader = DataLoader(train_subdataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
+    # ratio = 0.3  
+    # subset_size = int(len(train_dataset) * ratio)  
+    # indices = np.random.choice(len(train_dataset), subset_size, replace=False)
+    # train_subdataset = Subset(train_dataset, indices)
+    # train_loader = DataLoader(train_subdataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
 
     val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
 
-    # train_dataset = train_loader.dataset
+    train_dataset = train_loader.dataset
 
-    # qst_vocab_size = train_dataset.qst_vocab.vocab_size
-    # ans_vocab_size = train_dataset.ans_vocab.vocab_size
-    # ans_unk_idx = train_dataset.ans_vocab.unk2idx
-    qst_vocab_size = train_subdataset.dataset.qst_vocab.vocab_size
-    ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
-    ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
+    qst_vocab_size = train_dataset.qst_vocab.vocab_size
+    ans_vocab_size = train_dataset.ans_vocab.vocab_size
+    ans_unk_idx = train_dataset.ans_vocab.unk2idx
+    # qst_vocab_size = train_subdataset.dataset.qst_vocab.vocab_size
+    # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
+    # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
