@@ -323,72 +323,60 @@ class ResIncepEncoder(nn.Module):
 
 
 #  In[130]:
-# import gensim.downloader as api
+import gensim.downloader as api
 
-# glove_model = api.load("glove-wiki-gigaword-300") 
+glove_model = api.load("glove-wiki-gigaword-300") 
 
-# def build_embedding_matrix(qst_vocab, word_embed_size):
-#     vocab_size = qst_vocab.vocab_size
-#     embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+def build_embedding_matrix(qst_vocab, word_embed_size):
+    vocab_size = qst_vocab.vocab_size
+    embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
 
-#     for word, idx in qst_vocab.word2idx_dict.items():
-#         if word in glove_model.key_to_index:
-#             embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
-#         else:
-#             torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
+    for word, idx in qst_vocab.word2idx_dict.items():
+        if word in glove_model.key_to_index:
+            embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
+        else:
+            torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
 
-#     for word in ["<pad>", "<unk>"]:
-#         if word in qst_vocab.word2idx_dict:
-#             embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
+    for word in ["<pad>", "<unk>"]:
+        if word in qst_vocab.word2idx_dict:
+            embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
     
-#     return embedding_matrix
-
-# class QstEncoder(nn.Module):
-#     def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
-#         super(QstEncoder, self).__init__()
-
-#         self.word_embed_size = word_embed_size
-#         self.hidden_size = hidden_size
-#         self.num_layers = num_layers
-
-#         # pass the precomputed embedding matrix
-#         embedding_matrix = build_embedding_matrix(qst_vocab, word_embed_size)
-
-#         # Embedding layer 
-#         self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
-#         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
-
-#         # LSTM Encoder
-#         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-#         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
-#         self.norm = nn.LayerNorm(embed_size)
-#         self.tanh = nn.Tanh()
-
-#     def forward(self, question):
-#           qst_vec = self.word2vec(question)  
-#           qst_vec, (hidden, _) = self.lstm(qst_vec)  
-  
-#           hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
-  
-#           qst_feature = self.tanh(self.fc(hidden))  
-#           qst_feature = self.norm(qst_feature)
-#           return qst_feature
-    
-from transformers import BertModel, BertTokenizer
+    return embedding_matrix
 
 class QstEncoder(nn.Module):
-    def __init__(self, embed_size, bert_model_name="bert-base-uncased"):
+    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
         super(QstEncoder, self).__init__()
-        self.bert = BertModel.from_pretrained(bert_model_name)
-        self.fc = nn.Linear(self.bert.config.hidden_size, embed_size)
+
+        self.word_embed_size = word_embed_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # pass the precomputed embedding matrix
+        embedding_matrix = build_embedding_matrix(qst_vocab, word_embed_size)
+
+        # Embedding layer 
+        self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
+        print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
+
+        # LSTM Encoder
+        self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
+        # self.fc = nn.Linear(2 * hidden_size, embed_size)
         self.norm = nn.LayerNorm(embed_size)
         self.tanh = nn.Tanh()
 
-    def forward(self, question_tokens, attention_mask):
-        outputs = self.bert(question_tokens, attention_mask=attention_mask)
-        qst_feature = self.tanh(self.fc(outputs.pooler_output))
-        qst_feature = self.norm(qst_feature)
-        return qst_feature
+    def forward(self, question):
+          qst_vec = self.word2vec(question)  
+          qst_vec, (hidden, _) = self.lstm(qst_vec)  
+  
+          hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
+  
+          qst_feature = self.tanh(self.fc(hidden))
+        #   qst_feature = self.tanh(self.fc(qst_vec))   
+          qst_feature = self.norm(qst_feature)
+          if qst_feature.dim() == 4:
+            qst_feature = qst_feature.squeeze(1)
+          return qst_feature
 
 
 
@@ -467,18 +455,47 @@ class QstEncoder(nn.Module):
 #         u = self.norm(vi_attended + vq) 
 #         return u
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, embed_size, num_heads=4, dropout=0.5):
-        super(MultiHeadAttention, self).__init__()
-        self.mha = nn.MultiheadAttention(embed_dim=embed_size, num_heads=num_heads, batch_first=True)
+class Attention(nn.Module):
+    def __init__(self, embed_size, dropout=True):
+        super(Attention, self).__init__()
+        self.embed_size = embed_size
+        
+        # Linear layers 
+        self.q_linear = nn.Linear(embed_size, embed_size)
+        self.k_linear = nn.Linear(embed_size, embed_size)
+        self.v_linear = nn.Linear(embed_size, embed_size)
+
+        self.dropout = nn.Dropout(p=0.5) if dropout else nn.Identity()
         self.norm = nn.LayerNorm(embed_size)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, vi, vq):
-        vq = vq.unsqueeze(1) 
-        attn_output, _ = self.mha(vq, vi, vi) 
-        u = self.norm(vq + attn_output).squeeze(1)  
+        q = self.q_linear(vq).unsqueeze(1) 
+        k = self.k_linear(vi)  
+        v = self.v_linear(vi) 
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.embed_size ** 0.5)  
+        attn_weights = torch.softmax(attn_scores, dim=-1)  
+
+        vi_attended = torch.matmul(attn_weights, v).squeeze(1) 
+
+        u = self.norm(vi_attended + vq)  
+
         return u
+
+# class MultiHeadAttention(nn.Module):
+#     def __init__(self, embed_size, num_heads=2, dropout=0.5):
+#         super(MultiHeadAttention, self).__init__()
+#         self.mha = nn.MultiheadAttention(embed_dim=embed_size, num_heads=num_heads, batch_first=True)
+#         self.norm = nn.LayerNorm(embed_size)
+#         self.dropout = nn.Dropout(dropout)
+
+#     def forward(self, vi, vq):
+#         if vq.dim() == 4:  
+#             print(f"Fixing shape: Original vq {vq.shape}")
+#             vq = vq.squeeze(1) 
+#         attn_output, _ = self.mha(vq, vi, vi) 
+#         u = self.norm(vq + attn_output).squeeze(1)  
+#         return u
 
 
 class MLPBlock(nn.Module):
@@ -497,16 +514,24 @@ class MLPBlock(nn.Module):
         return self.fc3(x) 
 
 
+# In[132]:
+
 class SANModel(nn.Module):
     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
         super(SANModel, self).__init__()
-        self.num_attention_layers = 4
+        self.num_attention_layer = 4
+
+        # Image Encoder
         self.img_encoder = ResIncepEncoder(embed_size)
         self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
-        self.san = nn.ModuleList([MultiHeadAttention(embed_size, num_heads=4) for _ in range(self.num_attention_layers)])
+        # self.san = nn.ModuleList([MultiHeadAttention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
+        self.san = nn.ModuleList([Attention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
+
+        # MLP
         self.mlp = MLPBlock(embed_size, ans_vocab_size)
 
     def forward(self, img, qst):
+        # Encode Image & Question
         img_feature = self.img_encoder(img)  
         qst_feature = self.qst_encoder(qst) 
 
@@ -515,47 +540,11 @@ class SANModel(nn.Module):
         for attn_layer in self.san:
             u = attn_layer(img_feature, u)
 
-        # MLP classifier
-        combined_feature = self.mlp(u)
+        # Pooling for mha
+        # u = u.mean(dim=1)  
+
+        combined_feature = self.mlp(u)  
         return combined_feature
-
-
-# In[132]:
-
-# class SANModel(nn.Module):
-#     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
-#         super(SANModel, self).__init__()
-#         self.num_attention_layer = 4
-
-#         # Image Encoder
-#         self.img_encoder = ResIncepEncoder(embed_size)
-#         self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
-#         self.san = nn.ModuleList([MultiHeadAttention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
-
-#         # MLP
-#         self.mlp = nn.Sequential(
-#             nn.Linear(embed_size, 1024),
-#             nn.ReLU(),
-#             nn.Dropout(0.5),
-#             nn.Linear(1024, 512),
-#             nn.ReLU(),
-#             nn.Dropout(0.5),
-#             nn.Linear(512, ans_vocab_size) 
-#         )
-
-#     def forward(self, img, qst):
-#         # Encode Image & Question
-#         img_feature = self.img_encoder(img)  
-#         qst_feature = self.qst_encoder(qst) 
-
-#         # Stacked Attention
-#         u = qst_feature
-#         for attn_layer in self.san:
-#             u = attn_layer(img_feature, u)
-
-#         combined_feature = self.mlp(u)  
-#         return combined_feature
-
 
 
 # In[ ]:
@@ -595,7 +584,7 @@ def train():
     # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
     # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
-    use_saved_model = True 
+    use_saved_model = False
     checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-11.pth" 
     best_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model.pt"  
 
@@ -610,6 +599,7 @@ def train():
         num_layers=2,
         hidden_size=64
     )
+
 
     optimizer = optim.Adam(model.parameters(), lr=5e-4)
 
@@ -658,7 +648,7 @@ def train():
     val_increase_count = 0
     stop_training = False
     prev_loss = 9999
-    num_epochs = 10
+    num_epochs = 30
     save_step = 1
 
     print("Starting training...")
