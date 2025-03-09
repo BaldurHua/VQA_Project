@@ -6,5 +6,6 @@
 *.jpg
 
 # Ignore saved models & checkpoints
+*.pth
 *.pt
 checkpoints/
