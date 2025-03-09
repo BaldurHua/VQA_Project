@@ -322,58 +322,74 @@ class ResIncepEncoder(nn.Module):
         return x
 
 
-# In[130]:
-import gensim.downloader as api
+#  In[130]:
+# import gensim.downloader as api
 
-glove_model = api.load("glove-wiki-gigaword-300") 
+# glove_model = api.load("glove-wiki-gigaword-300") 
 
-def build_embedding_matrix(qst_vocab, word_embed_size):
-    vocab_size = qst_vocab.vocab_size
-    embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+# def build_embedding_matrix(qst_vocab, word_embed_size):
+#     vocab_size = qst_vocab.vocab_size
+#     embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
 
-    for word, idx in qst_vocab.word2idx_dict.items():
-        if word in glove_model.key_to_index:
-            embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
-        else:
-            torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
+#     for word, idx in qst_vocab.word2idx_dict.items():
+#         if word in glove_model.key_to_index:
+#             embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
+#         else:
+#             torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
 
-    # Set padding & unknown words to zero
-    for word in ["<pad>", "<unk>"]:
-        if word in qst_vocab.word2idx_dict:
-            embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
+#     for word in ["<pad>", "<unk>"]:
+#         if word in qst_vocab.word2idx_dict:
+#             embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
     
-    return embedding_matrix
+#     return embedding_matrix
+
+# class QstEncoder(nn.Module):
+#     def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
+#         super(QstEncoder, self).__init__()
+
+#         self.word_embed_size = word_embed_size
+#         self.hidden_size = hidden_size
+#         self.num_layers = num_layers
+
+#         # pass the precomputed embedding matrix
+#         embedding_matrix = build_embedding_matrix(qst_vocab, word_embed_size)
+
+#         # Embedding layer 
+#         self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
+#         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
+
+#         # LSTM Encoder
+#         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+#         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
+#         self.norm = nn.LayerNorm(embed_size)
+#         self.tanh = nn.Tanh()
+
+#     def forward(self, question):
+#           qst_vec = self.word2vec(question)  
+#           qst_vec, (hidden, _) = self.lstm(qst_vec)  
+  
+#           hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
+  
+#           qst_feature = self.tanh(self.fc(hidden))  
+#           qst_feature = self.norm(qst_feature)
+#           return qst_feature
+    
+from transformers import BertModel, BertTokenizer
 
 class QstEncoder(nn.Module):
-    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
+    def __init__(self, embed_size, bert_model_name="bert-base-uncased"):
         super(QstEncoder, self).__init__()
-
-        self.word_embed_size = word_embed_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        # pass the precomputed embedding matrix
-        embedding_matrix = build_embedding_matrix(qst_vocab, word_embed_size)
-
-        # Embedding layer 
-        self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
-        print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
-
-        # LSTM Encoder
-        self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.fc = nn.Linear(self.bert.config.hidden_size, embed_size)
         self.norm = nn.LayerNorm(embed_size)
         self.tanh = nn.Tanh()
 
-    def forward(self, question):
-          qst_vec = self.word2vec(question)  
-          qst_vec, (hidden, _) = self.lstm(qst_vec)  
-  
-          hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
-  
-          qst_feature = self.tanh(self.fc(hidden))  
-          qst_feature = self.norm(qst_feature)
-          return qst_feature
+    def forward(self, question_tokens, attention_mask):
+        outputs = self.bert(question_tokens, attention_mask=attention_mask)
+        qst_feature = self.tanh(self.fc(outputs.pooler_output))
+        qst_feature = self.norm(qst_feature)
+        return qst_feature
+
 
 
 # class QstEncoder(nn.Module):
@@ -428,55 +444,69 @@ class QstEncoder(nn.Module):
 
 # In[131]:
 
-class Attention(nn.Module):
-    def __init__(self, num_channels, embed_size, dropout=True):
-        super(Attention, self).__init__()
-        self.ff_image = nn.Linear(embed_size, num_channels)
-        self.ff_questions = nn.Linear(embed_size, num_channels)
-        self.dropout = nn.Dropout(p=0.5) if dropout else nn.Identity()
-        self.ff_attention = nn.Linear(num_channels, 1)
-        self.norm = nn.LayerNorm(embed_size)  
+# class Attention(nn.Module):
+#     def __init__(self, num_channels, embed_size, dropout=True):
+#         super(Attention, self).__init__()
+#         self.ff_image = nn.Linear(embed_size, num_channels)
+#         self.ff_questions = nn.Linear(embed_size, num_channels)
+#         self.dropout = nn.Dropout(p=0.5) if dropout else nn.Identity()
+#         self.ff_attention = nn.Linear(num_channels, 1)
+#         self.norm = nn.LayerNorm(embed_size)  
+
+#     def forward(self, vi, vq):
+#         hi = self.ff_image(vi)  
+#         hq = self.ff_questions(vq).unsqueeze(dim=1)  
+#         ha = torch.tanh(hi + hq)
+
+#         ha = self.dropout(ha)  
+#         ha = self.ff_attention(ha) 
+
+#         pi = torch.softmax(ha, dim=1)  
+#         vi_attended = (pi * vi).sum(dim=1)
+
+#         u = self.norm(vi_attended + vq) 
+#         return u
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_size, num_heads=4, dropout=0.5):
+        super(MultiHeadAttention, self).__init__()
+        self.mha = nn.MultiheadAttention(embed_dim=embed_size, num_heads=num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_size)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, vi, vq):
-        hi = self.ff_image(vi)  
-        hq = self.ff_questions(vq).unsqueeze(dim=1)  
-        ha = torch.tanh(hi + hq)
-
-        ha = self.dropout(ha)  
-        ha = self.ff_attention(ha) 
-
-        pi = torch.softmax(ha, dim=1)  
-        vi_attended = (pi * vi).sum(dim=1)
-
-        u = self.norm(vi_attended + vq) 
+        vq = vq.unsqueeze(1) 
+        attn_output, _ = self.mha(vq, vi, vi) 
+        u = self.norm(vq + attn_output).squeeze(1)  
         return u
 
 
-# In[132]:
+class MLPBlock(nn.Module):
+    def __init__(self, embed_size, ans_vocab_size):
+        super(MLPBlock, self).__init__()
+        self.fc1 = nn.Linear(embed_size, 1024)
+        self.gelu = nn.GELU()
+        self.norm1 = nn.LayerNorm(1024)
+        self.fc2 = nn.Linear(1024, 512)
+        self.norm2 = nn.LayerNorm(512)
+        self.fc3 = nn.Linear(512, ans_vocab_size)
+
+    def forward(self, x):
+        x = self.norm1(self.gelu(self.fc1(x)))
+        x = self.norm2(self.gelu(self.fc2(x)))
+        return self.fc3(x) 
+
 
 class SANModel(nn.Module):
     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
         super(SANModel, self).__init__()
-        self.num_attention_layer = 4
-
-        # Image Encoder
+        self.num_attention_layers = 4
         self.img_encoder = ResIncepEncoder(embed_size)
         self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
-        self.san = nn.ModuleList([Attention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
-
-        # MLP
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_size, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, ans_vocab_size) 
-        )
+        self.san = nn.ModuleList([MultiHeadAttention(embed_size, num_heads=4) for _ in range(self.num_attention_layers)])
+        self.mlp = MLPBlock(embed_size, ans_vocab_size)
 
     def forward(self, img, qst):
-        # Encode Image & Question
         img_feature = self.img_encoder(img)  
         qst_feature = self.qst_encoder(qst) 
 
@@ -485,13 +515,52 @@ class SANModel(nn.Module):
         for attn_layer in self.san:
             u = attn_layer(img_feature, u)
 
-        combined_feature = self.mlp(u)  
+        # MLP classifier
+        combined_feature = self.mlp(u)
         return combined_feature
+
+
+# In[132]:
+
+# class SANModel(nn.Module):
+#     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
+#         super(SANModel, self).__init__()
+#         self.num_attention_layer = 4
+
+#         # Image Encoder
+#         self.img_encoder = ResIncepEncoder(embed_size)
+#         self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
+#         self.san = nn.ModuleList([MultiHeadAttention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
+
+#         # MLP
+#         self.mlp = nn.Sequential(
+#             nn.Linear(embed_size, 1024),
+#             nn.ReLU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(1024, 512),
+#             nn.ReLU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(512, ans_vocab_size) 
+#         )
+
+#     def forward(self, img, qst):
+#         # Encode Image & Question
+#         img_feature = self.img_encoder(img)  
+#         qst_feature = self.qst_encoder(qst) 
+
+#         # Stacked Attention
+#         u = qst_feature
+#         for attn_layer in self.san:
+#             u = attn_layer(img_feature, u)
+
+#         combined_feature = self.mlp(u)  
+#         return combined_feature
 
 
 
 # In[ ]:
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import Subset
 import torch.optim as optim
 import time
@@ -500,7 +569,7 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     # ratio = 0.3  
     # subset_size = int(len(train_dataset) * ratio)  
@@ -512,7 +581,7 @@ def train():
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
@@ -526,27 +595,63 @@ def train():
     # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
     # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
+    use_saved_model = True 
+    checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-11.pth" 
+    best_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model.pt"  
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SANModel(
-            embed_size=512, # tune
-            qst_vocab=VocabDict('C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed/vocab_questions.txt'),
-            ans_vocab_size=ans_vocab_size,
-            word_embed_size=300,
-            num_layers=2,
-            hidden_size=64)
-    
-    model.apply(init_weights)
 
-    model.to(device)
+    # Initialize model
+    model = SANModel(
+        embed_size=512, 
+        qst_vocab=VocabDict('C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed/vocab_questions.txt'),
+        ans_vocab_size=ans_vocab_size,
+        word_embed_size=300,
+        num_layers=2,
+        hidden_size=64
+    )
+
+    optimizer = optim.Adam(model.parameters(), lr=5e-4)
+
+    if use_saved_model and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        model.load_state_dict(checkpoint['model_state_dict'])  
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
+        start_epoch = checkpoint['epoch'] + 1 
+        prev_loss = checkpoint.get('loss', None)  
+
+        print(f"Resumed from epoch {start_epoch}, previous loss: {prev_loss:.4f}" if prev_loss else f"Resumed from epoch {start_epoch}")
+        model.to(device)
+
+    elif use_saved_model:
+        print("Loading saved model.")
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+        start_epoch = 0  
+        model.to(device)
+
+    else:
+        print("Starting new model.")
+        start_epoch = 0
+        model.apply(init_weights)  
+        model.to(device)
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = 5e-4
+
+        model.apply(init_weights)
+
+        model.to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+
     # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
     
     # model = torch.compile(model)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
-
+    # scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2, eta_min=1e-6)
     last_time = 0
     early_stop_threshold = 3
     best_loss = 99999
@@ -557,7 +662,7 @@ def train():
     save_step = 1
 
     print("Starting training...")
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         if stop_training:
             print(f"Early stopping triggered at epoch {epoch+1}")
             break
@@ -640,7 +745,8 @@ def train():
 
             # Validation
             if phase == 'valid':
-                scheduler.step(epoch_loss)  
+                # scheduler.step(epoch_loss) 
+                scheduler.step(epoch + batch_idx / len(dataloader)) 
 
                 if epoch_loss < best_loss:
                     best_loss = epoch_loss
@@ -656,8 +762,13 @@ def train():
 
                 prev_loss = epoch_loss
 
-        if (epoch + 1) % save_step == 0:
-            torch.save(model.state_dict(), os.path.join(model_dir, f'model-epoch-{epoch+1:02d}.pt'))
+        torch.save({'epoch': epoch + 1,  
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': epoch_loss
+                }, os.path.join(model_dir, f'checkpoint-epoch-{epoch+1:02d}.pth'))
+
+        print(f"Checkpoint saved at epoch {epoch + 1}")
 
 # In[ ]:
 if __name__ == '__main__':
