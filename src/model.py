@@ -149,13 +149,28 @@ transform = transforms.Compose([
     transforms.ToTensor()  
 ])
 
+train_transform = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+    transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+
 train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
-                           transform=transform)
+                           transform=train_transform)
 
 val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_val.pkl", 
-                           transform=transform)
+                           transform=val_transform)
 
 test_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_test.pkl", 
@@ -344,7 +359,7 @@ def build_embedding_matrix(qst_vocab, word_embed_size):
     return embedding_matrix
 
 class QstEncoder(nn.Module):
-    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
+    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=128, freeze_emb=True):
         super(QstEncoder, self).__init__()
 
         self.word_embed_size = word_embed_size
@@ -359,7 +374,7 @@ class QstEncoder(nn.Module):
         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
 
         # LSTM Encoder
-        self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=0.3)
         self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
         # self.fc = nn.Linear(2 * hidden_size, embed_size)
         self.norm = nn.LayerNorm(embed_size)
@@ -499,19 +514,21 @@ class Attention(nn.Module):
 
 
 class MLPBlock(nn.Module):
-    def __init__(self, embed_size, ans_vocab_size):
+    def __init__(self, embed_size, ans_vocab_size, dropout=0.6):
         super(MLPBlock, self).__init__()
         self.fc1 = nn.Linear(embed_size, 1024)
         self.gelu = nn.GELU()
         self.norm1 = nn.LayerNorm(1024)
+        self.dropout = nn.Dropout(dropout)
         self.fc2 = nn.Linear(1024, 512)
         self.norm2 = nn.LayerNorm(512)
         self.fc3 = nn.Linear(512, ans_vocab_size)
 
     def forward(self, x):
-        x = self.norm1(self.gelu(self.fc1(x)))
-        x = self.norm2(self.gelu(self.fc2(x)))
-        return self.fc3(x) 
+        x = self.dropout(self.norm1(self.gelu(self.fc1(x))))
+        x = self.dropout(self.norm2(self.gelu(self.fc2(x))))
+        return self.fc3(x)
+
 
 
 # In[132]:
@@ -519,7 +536,7 @@ class MLPBlock(nn.Module):
 class SANModel(nn.Module):
     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
         super(SANModel, self).__init__()
-        self.num_attention_layer = 4
+        self.num_attention_layer = 2
 
         # Image Encoder
         self.img_encoder = ResIncepEncoder(embed_size)
@@ -558,7 +575,7 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     # ratio = 0.3  
     # subset_size = int(len(train_dataset) * ratio)  
@@ -570,7 +587,7 @@ def train():
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
@@ -601,7 +618,7 @@ def train():
     )
 
 
-    optimizer = optim.Adam(model.parameters(), lr=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
 
     if use_saved_model and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -633,22 +650,22 @@ def train():
 
         model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
 
     # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
     
     # model = torch.compile(model)
 
     criterion = nn.CrossEntropyLoss()
-    # scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=2)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2, eta_min=1e-6)
+    scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.5, patience=3)
+    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
     last_time = 0
     early_stop_threshold = 3
     best_loss = 99999
     val_increase_count = 0
     stop_training = False
     prev_loss = 9999
-    num_epochs = 30
+    num_epochs = 25
     save_step = 1
 
     print("Starting training...")
@@ -735,8 +752,8 @@ def train():
 
             # Validation
             if phase == 'valid':
-                # scheduler.step(epoch_loss) 
-                scheduler.step(epoch + batch_idx / len(dataloader)) 
+                scheduler.step(epoch_acc) 
+                # scheduler.step(epoch + batch_idx / len(dataloader)) 
 
                 if epoch_loss < best_loss:
                     best_loss = epoch_loss
