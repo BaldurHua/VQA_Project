@@ -8,8 +8,8 @@ app = FastAPI()
 
 def preprocess_image(image_data):
     image = Image.open(BytesIO(image_data)).convert("RGB")
-    image = image.resize((224, 224))  # Resize for model input
-    return torch.tensor(image)  # Convert to tensor if needed
+    image = image.resize((224, 224))  
+    return torch.tensor(image) 
 
 @app.post("/vqa/")
 async def process_vqa(image_base64: str = Form(...), question: str = Form(...)):
