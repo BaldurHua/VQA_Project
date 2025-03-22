@@ -1,24 +1,41 @@
-from fastapi import FastAPI, File, Form
-import base64
-from io import BytesIO
-from PIL import Image
-import torch
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("\n Registered Routes in FastAPI:")
+    for route in app.routes:
+        print(f" {route.path} [{', '.join(route.methods)}]")
+    yield 
+    print("\n FastAPI is shutting down...")
 
-def preprocess_image(image_data):
-    image = Image.open(BytesIO(image_data)).convert("RGB")
-    image = image.resize((224, 224))  
-    return torch.tensor(image) 
+app = FastAPI(
+    title="FastAPI Test API",
+    description="This API is used for testing endpoints",
+    version="1.0",
+    openapi_url="/openapi.json",
+    lifespan=lifespan
+)
+
+print("\n FastAPI is running.")
+
+@app.get("/test", tags=["Debug"])
+async def test_api():
+    print("/test endpoint was accessed!")
+    return {"message": "FastAPI is receiving requests!"}
 
 @app.post("/vqa/")
-async def process_vqa(image_base64: str = Form(...), question: str = Form(...)):
-    image_data = base64.b64decode(image_base64)
-    processed_image = preprocess_image(image_data)
-    
-    # Call your VQA model here
-    answer = "This is a sample VQA response."
-    
-    return {"answer": answer}
+async def process_vqa(request: Request):
+    raw_body = await request.body()
+    print("\n Raw Request Body (received by FastAPI):", raw_body.decode("utf-8"))
+
+    return {"answer": "This is a sample VQA response."}
+
+
+
+
+
+
+
 
 

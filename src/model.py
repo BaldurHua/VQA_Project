@@ -153,6 +153,7 @@ train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
     transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -203,8 +204,12 @@ import torch.nn.functional as F
 #         nn.init.constant_(m.bias, 0)
 
 def init_weights(m):
+    # Skip layers from pretrained models
+    if hasattr(m, "weight") and m.weight is not None and m.weight.requires_grad is False:
+        return  
+
     if isinstance(m, nn.Linear):
-        if isinstance(m, nn.Linear) and m.weight.shape[0] < 2048:
+        if m.weight.shape[0] < 2048:
             nn.init.xavier_uniform_(m.weight)  
         else:
             nn.init.kaiming_uniform_(m.weight, nonlinearity='relu') 
@@ -217,15 +222,18 @@ def init_weights(m):
             nn.init.constant_(m.bias, 0)
 
     elif isinstance(m, nn.BatchNorm2d):
-        nn.init.constant_(m.weight, 1)
+        nn.init.normal_(m.weight, mean=1.0, std=0.02) 
         nn.init.constant_(m.bias, 0)
 
+    elif isinstance(m, nn.LayerNorm):  # LayerNorm
+        nn.init.constant_(m.bias, 0)
+        nn.init.constant_(m.weight, 1)
 
 
 class InceptionModule(nn.Module):
     def __init__(self, in_channels):
         super(InceptionModule, self).__init__()
-        out_channels_branch = 16 
+        out_channels_branch = 16  
         self.branch1x1 = nn.Conv2d(in_channels, out_channels_branch, kernel_size=1)
 
         self.branch5x5_1 = nn.Conv2d(in_channels, out_channels_branch, kernel_size=1)
@@ -236,8 +244,6 @@ class InceptionModule(nn.Module):
         self.branch3x3dbl_3 = nn.Conv2d(out_channels_branch, out_channels_branch, kernel_size=3, padding=1)
 
         self.branch_pool = nn.Conv2d(in_channels, out_channels_branch, kernel_size=1)
-        
-        self.apply(init_weights)
 
     def forward(self, x):
         branch1x1 = self.branch1x1(x)
@@ -249,37 +255,38 @@ class InceptionModule(nn.Module):
         branch3x3dbl = self.branch3x3dbl_2(branch3x3dbl)
         branch3x3dbl = self.branch3x3dbl_3(branch3x3dbl)
 
-        branch_pool = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
-        branch_pool = self.branch_pool(branch_pool)
+        branch_pool = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)  
+        branch_pool = self.branch_pool(branch_pool)  
 
-        outputs = [branch1x1, branch5x5, branch3x3dbl, branch_pool]
-        return torch.cat(outputs, 1) 
+        return torch.cat([branch1x1, branch5x5, branch3x3dbl, branch_pool], dim=1)
     
 class ResBlock(nn.Module):
     def __init__(self, in_channels):
         super(ResBlock, self).__init__()
+
         self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(in_channels)
         self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(in_channels)
-        
-        self.apply(init_weights)
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        identity = x
+        identity = x  
 
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-        out += identity
-        out = F.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out += identity  
+        out = self.relu(out)
 
         return out
 
 
 # In[129]:
-
-
 class ResIncepEncoder(nn.Module):
     def __init__(self, embed_size):
         super(ResIncepEncoder, self).__init__()
@@ -294,12 +301,14 @@ class ResIncepEncoder(nn.Module):
         self.res_block2 = ResBlock(32)
 
         # Inception module
-        self.inception = InceptionModule(32)
+        self.inception = InceptionModule(32)  
+        self.inception_bn = nn.BatchNorm2d(64) 
 
         # Double Convolution Layers
         self.conv2_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2_1 = nn.BatchNorm2d(64)
         self.relu2_1 = nn.ReLU(inplace=True)
+        
         self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2_2 = nn.BatchNorm2d(64)
         self.relu2_2 = nn.ReLU(inplace=True)
@@ -307,6 +316,7 @@ class ResIncepEncoder(nn.Module):
         self.conv3_1 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3_1 = nn.BatchNorm2d(128)
         self.relu3_1 = nn.ReLU(inplace=True)
+        
         self.conv3_2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
         self.bn3_2 = nn.BatchNorm2d(128)
         self.relu3_2 = nn.ReLU(inplace=True)
@@ -315,6 +325,11 @@ class ResIncepEncoder(nn.Module):
 
         # Feature Embedding Layer
         self.fc_embed = nn.Linear(128, embed_size)
+
+        self.norm = nn.LayerNorm(embed_size)
+        
+        # Initialize Weights
+        self.apply(init_weights)
 
     def forward(self, x):
         x = self.pool1(self.relu1(self.bn1(self.conv1(x))))
@@ -333,8 +348,28 @@ class ResIncepEncoder(nn.Module):
         x = x.view(batch_size, channels, height * width).transpose(1, 2)  
 
         x = self.fc_embed(x)  
+        x = self.norm(x)
 
         return x
+    
+
+# import torchvision.models as models
+# from torchvision.models import ResNet50_Weights
+
+# # Simpler approach
+# class ResNetEncoder(nn.Module):
+#     def __init__(self, embed_size):
+#         super(ResNetEncoder, self).__init__()
+#         self.resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+#         self.resnet.fc = nn.Identity()  
+#         self.fc = nn.Linear(2048, embed_size)  
+#         self.norm = nn.LayerNorm(embed_size)
+
+#     def forward(self, x):
+#         x = self.resnet(x)
+#         x = self.fc(x)  
+#         x = self.norm(x)  
+#         return x
 
 
 #  In[130]:
@@ -344,18 +379,21 @@ glove_model = api.load("glove-wiki-gigaword-300")
 
 def build_embedding_matrix(qst_vocab, word_embed_size):
     vocab_size = qst_vocab.vocab_size
-    embedding_matrix = torch.zeros((vocab_size, word_embed_size), dtype=torch.float)
+    embedding_matrix = torch.empty((vocab_size, word_embed_size), dtype=torch.float)
 
+    # Initialize all embeddings 
+    torch.nn.init.xavier_uniform_(embedding_matrix)
+
+    # Override with GloVe vectors 
     for word, idx in qst_vocab.word2idx_dict.items():
         if word in glove_model.key_to_index:
             embedding_matrix[idx] = torch.tensor(glove_model[word], dtype=torch.float)
-        else:
-            torch.nn.init.xavier_uniform_(embedding_matrix[idx].unsqueeze(0))  
 
+    # Set padding & unknown tokens to zero
     for word in ["<pad>", "<unk>"]:
         if word in qst_vocab.word2idx_dict:
             embedding_matrix[qst_vocab.word2idx_dict[word]] = torch.zeros(word_embed_size)
-    
+
     return embedding_matrix
 
 class QstEncoder(nn.Module):
@@ -373,19 +411,22 @@ class QstEncoder(nn.Module):
         self.word2vec = nn.Embedding.from_pretrained(embedding_matrix, freeze=freeze_emb)
         print(f"Initialized embedding layer with GloVe (freeze={freeze_emb})")
 
+        self.embedding_dropout = nn.Dropout(0.2)
+
         # LSTM Encoder
         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=0.3)
-        self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
-        # self.fc = nn.Linear(2 * hidden_size, embed_size)
+        # self.fc = nn.Linear(2 * num_layers * hidden_size, embed_size) 
+        self.fc = nn.Linear(2 * hidden_size, embed_size)
         self.norm = nn.LayerNorm(embed_size)
         self.tanh = nn.Tanh()
 
     def forward(self, question):
           qst_vec = self.word2vec(question)  
+          qst_vec = self.embedding_dropout(qst_vec)
           qst_vec, (hidden, _) = self.lstm(qst_vec)  
-  
-          hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)  
-  
+        #  hidden = hidden.permute(1, 0, 2).contiguous().view(hidden.size(1), -1)
+          hidden = hidden[-2:].transpose(0, 1).contiguous().view(hidden.size(1), -1)
+
           qst_feature = self.tanh(self.fc(hidden))
         #   qst_feature = self.tanh(self.fc(qst_vec))   
           qst_feature = self.norm(qst_feature)
@@ -480,7 +521,7 @@ class Attention(nn.Module):
         self.k_linear = nn.Linear(embed_size, embed_size)
         self.v_linear = nn.Linear(embed_size, embed_size)
 
-        self.dropout = nn.Dropout(p=0.5) if dropout else nn.Identity()
+        self.dropout = nn.Dropout(p=0.3) if dropout else nn.Identity()
         self.norm = nn.LayerNorm(embed_size)
 
     def forward(self, vi, vq):
@@ -496,6 +537,25 @@ class Attention(nn.Module):
         u = self.norm(vi_attended + vq)  
 
         return u
+
+# Simplified attention module
+# class Attention(nn.Module):
+#     def __init__(self, embed_size, dropout=0.4):
+#         super(Attention, self).__init__()
+#         self.img_proj = nn.Linear(embed_size, embed_size)
+#         self.q_proj = nn.Linear(embed_size, embed_size)
+#         self.attn = nn.Linear(embed_size, 1)
+#         self.dropout = nn.Dropout(dropout)
+#         self.norm = nn.LayerNorm(embed_size)
+
+#     def forward(self, vi, vq):
+#         hi = self.img_proj(vi)  
+#         hq = self.q_proj(vq).unsqueeze(1)  
+#         ha = torch.tanh(hi + hq)
+#         ha = self.dropout(self.attn(ha))  
+#         pi = torch.softmax(ha, dim=1)  
+#         vi_attended = (pi * vi).sum(dim=1)  
+#         return self.norm(vi_attended + vq)
 
 # class MultiHeadAttention(nn.Module):
 #     def __init__(self, embed_size, num_heads=2, dropout=0.5):
@@ -513,21 +573,42 @@ class Attention(nn.Module):
 #         return u
 
 
+# class MLPBlock(nn.Module):
+#     def __init__(self, embed_size, ans_vocab_size, dropout=0.5):
+#         super(MLPBlock, self).__init__()
+#         self.fc1 = nn.Linear(embed_size, 512)
+#         self.gelu = nn.GELU()
+#         self.norm1 = nn.LayerNorm(512)
+#         self.dropout = nn.Dropout(dropout)
+#         self.fc2 = nn.Linear(512, 256)
+#         self.norm2 = nn.LayerNorm(256)
+#         self.fc3 = nn.Linear(256, ans_vocab_size)
+
+#     def forward(self, x):
+#         x = self.dropout(self.norm1(self.gelu(self.fc1(x))))
+#         x = self.dropout(self.norm2(self.gelu(self.fc2(x))))
+#         return self.fc3(x)
+
 class MLPBlock(nn.Module):
-    def __init__(self, embed_size, ans_vocab_size, dropout=0.6):
+    def __init__(self, embed_size, ans_vocab_size, dropout=0.3):
         super(MLPBlock, self).__init__()
         self.fc1 = nn.Linear(embed_size, 1024)
         self.gelu = nn.GELU()
         self.norm1 = nn.LayerNorm(1024)
         self.dropout = nn.Dropout(dropout)
+        
         self.fc2 = nn.Linear(1024, 512)
         self.norm2 = nn.LayerNorm(512)
-        self.fc3 = nn.Linear(512, ans_vocab_size)
+        self.fc3 = nn.Linear(512, 256)
+        self.norm3 = nn.LayerNorm(256)
+        
+        self.fc_out = nn.Linear(256, ans_vocab_size)
 
     def forward(self, x):
         x = self.dropout(self.norm1(self.gelu(self.fc1(x))))
         x = self.dropout(self.norm2(self.gelu(self.fc2(x))))
-        return self.fc3(x)
+        x = self.dropout(self.norm3(self.gelu(self.fc3(x))))
+        return self.fc_out(x)
 
 
 
@@ -536,17 +617,19 @@ class MLPBlock(nn.Module):
 class SANModel(nn.Module):
     def __init__(self, embed_size, qst_vocab, ans_vocab_size, word_embed_size, num_layers, hidden_size, freeze_emb=True):
         super(SANModel, self).__init__()
+        self.embed_size = embed_size
         self.num_attention_layer = 2
 
         # Image Encoder
         self.img_encoder = ResIncepEncoder(embed_size)
+        # self.img_encoder = ResNetEncoder(embed_size)
         self.qst_encoder = QstEncoder(qst_vocab, word_embed_size, embed_size, num_layers, hidden_size, freeze_emb)
         # self.san = nn.ModuleList([MultiHeadAttention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
-        self.san = nn.ModuleList([Attention(embed_size, embed_size) for _ in range(self.num_attention_layer)])
+        self.san = nn.ModuleList([Attention(embed_size, dropout=0.3) for _ in range(self.num_attention_layer)])
 
         # MLP
         self.mlp = MLPBlock(embed_size, ans_vocab_size)
-
+      
     def forward(self, img, qst):
         # Encode Image & Question
         img_feature = self.img_encoder(img)  
@@ -555,7 +638,9 @@ class SANModel(nn.Module):
         # Stacked Attention
         u = qst_feature
         for attn_layer in self.san:
-            u = attn_layer(img_feature, u)
+            # u = attn_layer(img_feature, u)
+            # u = attn_layer(img_feature, u) + u
+            u = F.layer_norm(attn_layer(img_feature, u) + u, [self.embed_size])
 
         # Pooling for mha
         # u = u.mean(dim=1)  
@@ -565,8 +650,7 @@ class SANModel(nn.Module):
 
 
 # In[ ]:
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts, StepLR,  SequentialLR, LinearLR
 from torch.utils.data import Subset
 import torch.optim as optim
 import time
@@ -575,7 +659,7 @@ def train():
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
                            transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=1, pin_memory=True, persistent_workers=False)
 
     # ratio = 0.3  
     # subset_size = int(len(train_dataset) * ratio)  
@@ -587,7 +671,7 @@ def train():
                            input_vqa="preprocessed_val.pkl", 
                            transform=transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=0, pin_memory=True, persistent_workers=False)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
@@ -602,8 +686,9 @@ def train():
     # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
     use_saved_model = False
-    checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-11.pth" 
-    best_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model.pt"  
+    checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-100.pth" 
+    best_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model.pt"
+    best_acc_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_acc_model.pt" 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -614,173 +699,180 @@ def train():
         ans_vocab_size=ans_vocab_size,
         word_embed_size=300,
         num_layers=2,
-        hidden_size=64
+        hidden_size=256
     )
 
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
-
-    if use_saved_model and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-
-        model.load_state_dict(checkpoint['model_state_dict'])  
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
-        start_epoch = checkpoint['epoch'] + 1 
-        prev_loss = checkpoint.get('loss', None)  
-
-        print(f"Resumed from epoch {start_epoch}, previous loss: {prev_loss:.4f}" if prev_loss else f"Resumed from epoch {start_epoch}")
-        model.to(device)
-
-    elif use_saved_model:
-        print("Loading saved model.")
-        model.load_state_dict(torch.load(best_model_path, map_location=device))
-        start_epoch = 0  
-        model.to(device)
-
+    if use_saved_model:
+        try:
+            if os.path.exists(checkpoint_path):
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])  
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
+                start_epoch = checkpoint['epoch'] + 1  
+                prev_loss = checkpoint.get('loss', None)  
+                print(f"Resumed from epoch {start_epoch}, previous loss: {prev_loss:.4f}" if prev_loss else f"Resumed from epoch {start_epoch}")
+            else:
+                print("Loading saved best model.")
+                model.load_state_dict(torch.load(best_acc_model_path, map_location=device))
+                start_epoch = 0  
+        except Exception as e:
+            print(f"Error loading model: {e}. Starting from scratch.")
+            start_epoch = 0
+            model.apply(init_weights)  
     else:
         print("Starting new model.")
         start_epoch = 0
-        model.apply(init_weights)  
-        model.to(device)
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = 5e-4
-
         model.apply(init_weights)
 
-        model.to(device)
+    model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-4)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = 1e-3
+
+    #     model.apply(init_weights)
+
+    #     model.to(device)
 
     # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
     
     # model = torch.compile(model)
 
     criterion = nn.CrossEntropyLoss()
-    scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.5, patience=3)
-    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=1e-6)
+    # scheduler = StepLR(optimizer, step_size=5, gamma=0.8)  
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, min_lr=5e-5)
+    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=5e-5)
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=3)  
+    main_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=5e-5)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[3])
+
+
     last_time = 0
-    early_stop_threshold = 3
-    best_loss = 99999
+    early_stop_threshold = 7
+    best_loss = float("inf")
+    best_acc = 0.0
     val_increase_count = 0
     stop_training = False
-    prev_loss = 9999
-    num_epochs = 25
-    save_step = 1
+    prev_loss = float("inf")
+    num_epochs = 20
+    save_step = 5
 
     print("Starting training...")
     for epoch in range(start_epoch, num_epochs):
-        if stop_training:
-            print(f"Early stopping triggered at epoch {epoch+1}")
-            break
+            if stop_training:
+                print(f"Early stopping triggered at epoch {epoch+1}")
+                break
 
-        for phase in ['train', 'valid']: 
-            dataloader = train_loader if phase == 'train' else val_loader
-            dataset_size = len(dataloader.dataset)
+            for phase in ['train', 'valid']: 
+                dataloader = train_loader if phase == 'train' else val_loader
+                dataset_size = len(dataloader.dataset)
 
-            running_loss = 0.0
-            running_corr = 0
+                running_loss = 0.0
+                running_corr = 0
 
-            if phase == 'train':
-                model.train()
-            else:
-                model.eval()
-
-
-            last_time = time.time()
-
-            for batch_idx, batch_sample in enumerate(dataloader): 
-                image = batch_sample['image'].to(device)
-                question = batch_sample['question'].to(device)
-                label = batch_sample['answer_label'].to(device)
-                # multi_choice = batch_sample['answer_multi_choice']
-
-                optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'train'): 
-                    output = model(image, question)
-                    # print("Model Output Shape:", output.shape)
-                    # print("Label Shape:", label.shape)
-                    # print("Output Sample:", output[:10])
-                    # print("Prediction:", output.argmax(dim=1)[:10])
-
-                    _, pred = torch.max(output, 1)
-                    # print("Predictions vs Labels:", pred[:10], label[:10])
-                    loss = criterion(output, label)
-                
-                    if phase == 'train':
-                        loss.backward()
-                        # for name, param in model.named_parameters():
-                        #     if param.grad is not None:
-                        #         print(f"{name}: grad mean={param.grad.abs().mean():.6f}, grad max={param.grad.abs().max():.6f}")
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        optimizer.step()
-
-                # Accuracy handling
-                # if len(multi_choice) == 0:
-                #     multi_choice = torch.zeros((pred.size(0), 1), dtype=torch.long).to(device)
-                # else:
-                #     multi_choice = multi_choice.clone().detach().to(device)
-
-                # if multi_choice.dim() == 1:
-                #     multi_choice = multi_choice.unsqueeze(0)
-
-                correct_predictions = (pred == label).sum().item()
-                running_corr += correct_predictions
-                running_loss += loss.item() * image.size(0)
-
-                # Print periodically for progress
-                if batch_idx % 100 == 0 and batch_idx > 0:
-                    elapsed_time = time.time() - last_time
-                    estimated_time = elapsed_time * (len(dataloader) - batch_idx) / 100
-                    print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
-                          f'Batch [{batch_idx}/{len(dataloader)}], '
-                          f'Loss: {loss.item():.4f}, '
-                          f'Estimated time left: {estimated_time/3600:.2f} hr')
-                    last_time = time.time()
-
-            epoch_loss = running_loss / dataset_size
-            epoch_acc = running_corr / dataset_size
-
-            print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
-                  f'Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}\n')
-
-            # Logging
-            log_file = os.path.join(log_dir, f'{phase}-log.txt')
-            with open(log_file, 'a') as f:
-                f.write(f'Epoch {epoch+1}\tLoss: {epoch_loss:.4f}\tAcc: {epoch_acc:.4f}\n')
-
-            # Validation
-            if phase == 'valid':
-                scheduler.step(epoch_acc) 
-                # scheduler.step(epoch + batch_idx / len(dataloader)) 
-
-                if epoch_loss < best_loss:
-                    best_loss = epoch_loss
-                    torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pt'))
-
-                if epoch_loss > prev_loss:
-                    val_increase_count += 1
+                if phase == 'train':
+                    model.train()
                 else:
-                    val_increase_count = 0
+                    model.eval()
 
-                if val_increase_count >= early_stop_threshold:
-                    stop_training = True
 
-                prev_loss = epoch_loss
+                last_time = time.time()
 
-        torch.save({'epoch': epoch + 1,  
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': epoch_loss
-                }, os.path.join(model_dir, f'checkpoint-epoch-{epoch+1:02d}.pth'))
+                for batch_idx, batch_sample in enumerate(dataloader): 
+                    image = batch_sample['image'].to(device)
+                    question = batch_sample['question'].to(device)
+                    label = batch_sample['answer_label'].to(device)
 
-        print(f"Checkpoint saved at epoch {epoch + 1}")
+
+                    optimizer.zero_grad()
+
+                    with torch.set_grad_enabled(phase == 'train'):
+                        with torch.no_grad() if phase == 'valid' else torch.enable_grad():   
+                            output = model(image, question)
+
+
+                            _, pred = torch.max(output, 1)
+
+                            loss = criterion(output, label)
+
+                        if phase == 'train':
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                            optimizer.step()
+
+
+
+                    correct_predictions = (pred == label).sum().item()
+                    running_corr += correct_predictions
+                    running_loss += loss.item() * image.size(0)
+
+                    # Print periodically for progress
+                    if batch_idx % 100 == 0 and batch_idx > 0:
+                        elapsed_time = time.time() - last_time
+                        estimated_time = elapsed_time * (len(dataloader) - batch_idx) / 100
+                        print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
+                              f'Batch [{batch_idx}/{len(dataloader)}], '
+                              f'Loss: {loss.item():.4f}, '
+                              f'Estimated time left: {estimated_time/3600:.2f} hr')
+                        last_time = time.time()
+
+                epoch_loss = running_loss / dataset_size
+                epoch_acc = running_corr / dataset_size
+
+                print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
+                      f'Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}\n')
+
+
+                # Logging
+                log_file = os.path.join(log_dir, f'{phase}-log.txt')
+                with open(log_file, 'a') as f:
+                    f.write(f'Epoch {epoch+1}\tLoss: {epoch_loss:.4f}\tAcc: {epoch_acc:.4f}\n')
+                
+                if phase == 'train':  
+                    scheduler.step()
+
+                # Validation
+                if phase == 'valid':
+                    # scheduler.step(epoch_loss)
+
+                    for param_group in optimizer.param_groups:
+                        print(f"Current Learning Rate: {param_group['lr']:.6f}")
+
+                    if epoch_loss < best_loss:
+                        best_loss = epoch_loss
+                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pt'))
+
+                    if epoch_acc > best_acc:
+                        best_acc = epoch_acc
+                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_acc_model.pt'))
+
+                    if epoch_loss > prev_loss:
+                        val_increase_count += 1
+                    else:
+                        val_increase_count = 0
+
+                    if val_increase_count >= early_stop_threshold:
+                        stop_training = True
+
+                    prev_loss = epoch_loss
+
+
+
+            # scheduler.step()
+
+            if (epoch + 1) % save_step == 0:
+                torch.save({'epoch': epoch + 1,  
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': epoch_loss
+                        }, os.path.join(model_dir, f'checkpoint-epoch-{epoch+1:02d}.pth'))
+                print(f"Checkpoint saved at epoch {epoch + 1}")
+            
 
 # In[ ]:
 if __name__ == '__main__':
     train()
-
-
 
 

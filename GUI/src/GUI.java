@@ -1,20 +1,21 @@
 import javax.swing.*;
-import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
+import java.awt.event.*;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Base64;
+import java.net.URI;
+import java.net.URL;
+import java.net.http.*;
+import java.net.http.HttpRequest.BodyPublishers;
+import java.net.http.HttpResponse.BodyHandlers;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.net.URLEncoder;
-import org.json.JSONObject;
 
 public class GUI {
     private JFrame frame;
@@ -25,82 +26,114 @@ public class GUI {
     private File selectedFile;
 
     public GUI() {
-        frame = new JFrame("VQA Model UI");
-        frame.setSize(600, 600);
-        frame.setLayout(new GridBagLayout()); 
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(10, 10, 10, 10); 
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+
+        try {
+            UIManager.setLookAndFeel("javax.swing.plaf.nimbus.NimbusLookAndFeel");
+        } catch (Exception ignored) {}
         
-        // Image Selection
-        JButton uploadButton = new JButton("Select Image");
+        frame = new JFrame("Visual QA Model");
+        frame.getContentPane().setBackground(new Color(245, 245, 245));
+        frame.setSize(600, 500);
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setLocationRelativeTo(null); // Center 
+        frame.setResizable(false);
+
+        // Set Icon
+        URL iconURL = getClass().getResource("/img/qa.png");
+        ImageIcon icon = new ImageIcon(iconURL);
+        frame.setIconImage(icon.getImage());
+
+        JPanel panel = new JPanel();
+        panel.setBackground(new Color(245, 245, 245)); 
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 40, 20, 40)); 
+
+        // Upload Button
+        JButton uploadButton = new JButton("Please Select Image");
+        uploadButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        uploadButton.setMaximumSize(new Dimension(200, 40));
         uploadButton.addActionListener(e -> selectImage());
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.gridwidth = 2;
-        frame.add(uploadButton, gbc);
+        panel.add(uploadButton);
+        panel.add(Box.createRigidArea(new Dimension(0, 15)));
 
-        imageLabel = new JLabel("No Image Selected", SwingConstants.CENTER);
-        imageLabel.setPreferredSize(new Dimension(400, 200));
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        gbc.gridwidth = 2;
-        frame.add(imageLabel, gbc);
+        // Image Display 
+        imageLabel = new JLabel("No image selected", SwingConstants.CENTER);
+        imageLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        imageLabel.setPreferredSize(new Dimension(300, 200));
+        panel.add(imageLabel);
+        panel.add(Box.createRigidArea(new Dimension(0, 15)));
 
-        // Question Input
-        JLabel questionLabel = new JLabel("Enter Question: ");
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        gbc.gridwidth = 1;
-        frame.add(questionLabel, gbc);
+        // Question Field
+        JLabel questionLabel = new JLabel("Enter your question:");
+        questionLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(questionLabel);
+        panel.add(Box.createRigidArea(new Dimension(0, 5)));
+        questionField = new JTextField();
+        questionField.setMaximumSize(new Dimension(500, 30));
+        panel.add(questionField);
+        panel.add(Box.createRigidArea(new Dimension(0, 15)));
 
-        questionField = new JTextField(30);
-        gbc.gridx = 1;
-        gbc.gridy = 2;
-        frame.add(questionField, gbc);
-
-        // Submit
+        // Submit Button
         submitButton = new JButton("Ask VQA Model");
+        submitButton.setAlignmentX(Component.CENTER_ALIGNMENT);
+        submitButton.setMaximumSize(new Dimension(160, 40));
         submitButton.addActionListener(e -> sendDataToModel());
-        gbc.gridx = 0;
-        gbc.gridy = 3;
-        gbc.gridwidth = 2;
-        frame.add(submitButton, gbc);
+        submitButton.setFocusPainted(false);
+        panel.add(submitButton);
+        panel.add(Box.createRigidArea(new Dimension(0, 20)));
 
         // Answer
-        answerLabel = new JLabel("Answer: ", SwingConstants.CENTER);
-        gbc.gridx = 0;
-        gbc.gridy = 4;
-        gbc.gridwidth = 2;
-        frame.add(answerLabel, gbc);
+        answerLabel = new JLabel("Answer:", SwingConstants.CENTER);
+        answerLabel.setFont(new Font("Arial", Font.BOLD, 16));
+        answerLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        panel.add(answerLabel);
 
+
+        frame.add(panel);
         frame.setVisible(true);
     }
 
     private void selectImage() {
         JFileChooser fileChooser = new JFileChooser();
-        FileNameExtensionFilter filter = new FileNameExtensionFilter("Image Files (JPG, PNG, JPEG)", "jpg", "jpeg", "png");
-        fileChooser.setFileFilter(filter);
-
-        int returnValue = fileChooser.showOpenDialog(null);
-        if (returnValue == JFileChooser.APPROVE_OPTION) {
-            selectedFile = fileChooser.getSelectedFile();
-            
-            // Update label with image preview
-            try {
-                BufferedImage img = ImageIO.read(selectedFile);
-                ImageIcon icon = new ImageIcon(img.getScaledInstance(400, 200, Image.SCALE_SMOOTH));
-                imageLabel.setIcon(icon);
-            } catch (IOException e) {
-                JOptionPane.showMessageDialog(frame, "Error loading image!", "Error", JOptionPane.ERROR_MESSAGE);
+        JDialog chooserDialog = new JDialog(frame, "Select Image", true);
+        chooserDialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        URL iconURL = getClass().getResource("/img/find.png");  
+        if (iconURL != null) {
+            ImageIcon icon = new ImageIcon(iconURL);
+            chooserDialog.setIconImage(icon.getImage());
+        }
+    
+        chooserDialog.getContentPane().add(fileChooser);
+        chooserDialog.pack();
+        chooserDialog.setLocationRelativeTo(frame); 
+    
+        fileChooser.addActionListener(e -> {
+            if (e.getActionCommand().equals(JFileChooser.APPROVE_SELECTION)) {
+                selectedFile = fileChooser.getSelectedFile();
+                displayImageThumbnail(selectedFile.getAbsolutePath());
             }
+            chooserDialog.dispose(); 
+        });
+    
+        chooserDialog.setVisible(true);
+    }
+
+    private void displayImageThumbnail(String path) {
+        try {
+            BufferedImage originalImage = ImageIO.read(new File(path));
+            Image scaled = originalImage.getScaledInstance(300, 200, Image.SCALE_SMOOTH);
+            ImageIcon icon = new ImageIcon(scaled);
+            imageLabel.setIcon(icon);
+            imageLabel.setText(""); 
+        } catch (IOException e) {
+            imageLabel.setText("Could not display image.");
+            e.printStackTrace();
         }
     }
 
     private void sendDataToModel() {
         if (selectedFile == null || questionField.getText().isEmpty()) {
-            JOptionPane.showMessageDialog(frame, "Please select an image and enter a question.", "Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(frame, "Please select an image and enter a question.", "Missing Input", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
@@ -108,32 +141,36 @@ public class GUI {
         try {
             byte[] imageBytes = Files.readAllBytes(Paths.get(selectedFile.getAbsolutePath()));
             String base64Image = Base64.getEncoder().encodeToString(imageBytes);
-            
             String response = callVQAModel(base64Image, question);
             answerLabel.setText("Answer: " + response);
         } catch (IOException e) {
-            JOptionPane.showMessageDialog(frame, "Error processing image!", "Error", JOptionPane.ERROR_MESSAGE);
+            e.printStackTrace();
         }
     }
 
     private String callVQAModel(String base64Image, String question) {
         try {
             HttpClient client = HttpClient.newHttpClient();
-            JSONObject json = new JSONObject();
-            json.put("image_base64", base64Image);
-            json.put("question", question);
-    
+
+            String formData = "image_base64=" + URLEncoder.encode(base64Image, StandardCharsets.UTF_8) +
+                              "&question=" + URLEncoder.encode(question, StandardCharsets.UTF_8);
+
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:8000/vqa/")) 
-                    .header("Content-Type", "application/json") 
-                    .POST(HttpRequest.BodyPublishers.ofString(json.toString(), StandardCharsets.UTF_8))
+                    .uri(URI.create("http://127.0.0.1:8000/vqa/"))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .POST(BodyPublishers.ofString(formData))
                     .build();
-    
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-    
-            JSONObject jsonResponse = new JSONObject(response.body());
-            return jsonResponse.getString("answer"); 
-    
+
+            HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                JSONObject jsonResponse = new JSONObject(response.body());
+                return jsonResponse.getString("answer");
+            } else {
+                System.out.println("Response: " + response.body());
+                return "Error: Status " + response.statusCode();
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
             return "Error connecting to VQA model.";
@@ -144,4 +181,5 @@ public class GUI {
         SwingUtilities.invokeLater(GUI::new);
     }
 }
+
 
