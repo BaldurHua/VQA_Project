@@ -34,6 +34,7 @@ import pickle
 from PIL import Image
 from torch.utils.data import Dataset
 import cv2
+import gc
 
 
 # In[121]:
@@ -113,18 +114,19 @@ class VqaDataset(Dataset):
         sample = {
             "image": image,
             "question": torch.tensor(qst2idc, dtype=torch.long),
+            # "question_type": vqa["question_type"]
         }
 
         # Process Answers
         if self.load_ans:
             sample["answer_label"] = torch.tensor(vqa["answer_label"], dtype=torch.long)
 
-            # Multi-choice 
             MAX_ANSWERS = 10
             answer_multi_choice = vqa.get("valid_answers", [])
-            
+
             if len(answer_multi_choice) < MAX_ANSWERS:
-                answer_multi_choice += [0] * (MAX_ANSWERS - len(answer_multi_choice))
+                # answer_multi_choice += [0] * (MAX_ANSWERS - len(answer_multi_choice))
+                answer_multi_choice += [-1] * (MAX_ANSWERS - len(answer_multi_choice))
             else:
                 answer_multi_choice = answer_multi_choice[:MAX_ANSWERS]
 
@@ -140,7 +142,6 @@ class VqaDataset(Dataset):
 
 # In[126]:
 
-
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
@@ -150,9 +151,9 @@ transform = transforms.Compose([
 ])
 
 train_transform = transforms.Compose([
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
-    transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0)),
+    # transforms.RandomHorizontalFlip(p=0.5),
+    # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+    # transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0)),
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -186,10 +187,50 @@ test_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/prepro
 # print(sample_batch["question"].shape) 
 # print(sample_batch.get("answer_label", None))
 
+# In[]:
+import matplotlib.pyplot as plt
+import torchvision.transforms as transforms
+from PIL import Image
+import random
+
+# Load a random sample
+# idx = random.randint(0, len(train_dataset) - 1)
+# raw_path = train_dataset.vqa[idx]["image_path"]
+# raw_img = Image.open(raw_path).convert("RGB")
+# aug_img = train_transform(raw_img)
+
+# fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+# axs[0].imshow(raw_img)
+# axs[0].set_title("Original Image")
+# axs[0].axis('off')
+
+# aug_img_disp = transforms.ToPILImage()(aug_img)
+# axs[1].imshow(aug_img_disp)
+# axs[1].set_title("Transformed Image")
+# axs[1].axis('off')
+
+# plt.tight_layout()
+# plt.savefig("figure1_preprocessing.png")
+# plt.show()
+
+# In[ ]:
+# idx = random.randint(0, len(train_dataset) - 1)
+# vqa = train_dataset.vqa[idx]
+# token_ids = vqa["question_tokens"]
+# tokens = [train_dataset.qst_vocab.idx2word(i) for i in token_ids if i != 0] 
+# question = " ".join(tokens)
+# valid_answers = vqa["valid_answers"]
+
+# token_ids = [train_dataset.qst_vocab.word2idx(w) for w in tokens]
+# mapped_answers = [train_dataset.ans_vocab.word2idx(ans) for ans in valid_answers]
+
+# print(f"Q: {question}")
+# print(f"Tokens: {tokens}")
+# print(f"Token IDs: {token_ids}")
+# print(f"Valid Answers: {valid_answers}")
+# print(f"Mapped IDs: {mapped_answers}")
 
 # In[128]:
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -204,36 +245,37 @@ import torch.nn.functional as F
 #         nn.init.constant_(m.bias, 0)
 
 def init_weights(m):
-    # Skip layers from pretrained models
-    if hasattr(m, "weight") and m.weight is not None and m.weight.requires_grad is False:
-        return  
+    # Skip pretrained
+    if hasattr(m, "weight") and not m.weight.requires_grad:
+        return
 
     if isinstance(m, nn.Linear):
-        if m.weight.shape[0] < 2048:
-            nn.init.xavier_uniform_(m.weight)  
+        fan_in = m.weight.size(1)
+        if fan_in < 2048:
+            nn.init.xavier_uniform_(m.weight)
         else:
-            nn.init.kaiming_uniform_(m.weight, nonlinearity='relu') 
+            nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
-    
+
     elif isinstance(m, nn.Conv2d):
-        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
 
     elif isinstance(m, nn.BatchNorm2d):
-        nn.init.normal_(m.weight, mean=1.0, std=0.02) 
+        nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)
 
-    elif isinstance(m, nn.LayerNorm):  # LayerNorm
-        nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.LayerNorm):
         nn.init.constant_(m.weight, 1)
+        nn.init.constant_(m.bias, 0)
 
 
 class InceptionModule(nn.Module):
     def __init__(self, in_channels):
         super(InceptionModule, self).__init__()
-        out_channels_branch = 16  
+        out_channels_branch = 64 # tune  
         self.branch1x1 = nn.Conv2d(in_channels, out_channels_branch, kernel_size=1)
 
         self.branch5x5_1 = nn.Conv2d(in_channels, out_channels_branch, kernel_size=1)
@@ -302,10 +344,12 @@ class ResIncepEncoder(nn.Module):
 
         # Inception module
         self.inception = InceptionModule(32)  
-        self.inception_bn = nn.BatchNorm2d(64) 
+        # self.inception_bn = nn.BatchNorm2d(64)
+        self.inception_bn = nn.BatchNorm2d(256)
 
         # Double Convolution Layers
-        self.conv2_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        # self.conv2_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.conv2_1 = nn.Conv2d(256, 64, kernel_size=3, padding=1)
         self.bn2_1 = nn.BatchNorm2d(64)
         self.relu2_1 = nn.ReLU(inplace=True)
         
@@ -397,7 +441,7 @@ def build_embedding_matrix(qst_vocab, word_embed_size):
     return embedding_matrix
 
 class QstEncoder(nn.Module):
-    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=128, freeze_emb=True):
+    def __init__(self, qst_vocab, word_embed_size, embed_size, num_layers=2, hidden_size=256, freeze_emb=True):
         super(QstEncoder, self).__init__()
 
         self.word_embed_size = word_embed_size
@@ -573,29 +617,15 @@ class Attention(nn.Module):
 #         return u
 
 
-# class MLPBlock(nn.Module):
-#     def __init__(self, embed_size, ans_vocab_size, dropout=0.5):
-#         super(MLPBlock, self).__init__()
-#         self.fc1 = nn.Linear(embed_size, 512)
-#         self.gelu = nn.GELU()
-#         self.norm1 = nn.LayerNorm(512)
-#         self.dropout = nn.Dropout(dropout)
-#         self.fc2 = nn.Linear(512, 256)
-#         self.norm2 = nn.LayerNorm(256)
-#         self.fc3 = nn.Linear(256, ans_vocab_size)
-
-#     def forward(self, x):
-#         x = self.dropout(self.norm1(self.gelu(self.fc1(x))))
-#         x = self.dropout(self.norm2(self.gelu(self.fc2(x))))
-#         return self.fc3(x)
 
 class MLPBlock(nn.Module):
-    def __init__(self, embed_size, ans_vocab_size, dropout=0.3):
+    def __init__(self, embed_size, ans_vocab_size, dropout=0.4):
         super(MLPBlock, self).__init__()
         self.fc1 = nn.Linear(embed_size, 1024)
         self.gelu = nn.GELU()
         self.norm1 = nn.LayerNorm(1024)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(0.1)
         
         self.fc2 = nn.Linear(1024, 512)
         self.norm2 = nn.LayerNorm(512)
@@ -605,10 +635,26 @@ class MLPBlock(nn.Module):
         self.fc_out = nn.Linear(256, ans_vocab_size)
 
     def forward(self, x):
-        x = self.dropout(self.norm1(self.gelu(self.fc1(x))))
-        x = self.dropout(self.norm2(self.gelu(self.fc2(x))))
-        x = self.dropout(self.norm3(self.gelu(self.fc3(x))))
+        x = self.dropout1(self.norm1(self.gelu(self.fc1(x))))
+        x = self.dropout2(self.norm2(self.gelu(self.fc2(x))))
+        # x = self.dropout2(self.norm3(self.gelu(self.fc3(x))))
+        x= self.norm3(self.gelu(self.fc3(x)))
         return self.fc_out(x)
+    
+# Simplified MLP block
+# class MLPBlock(nn.Module):
+#     def __init__(self, embed_size, ans_vocab_size, dropout=0.3):
+#         super(MLPBlock, self).__init__()
+#         self.mlp = nn.Sequential(
+#             nn.Linear(embed_size, 1024),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(1024, ans_vocab_size)
+#         )
+
+#     def forward(self, x):
+#         return self.mlp(x)
+
 
 
 
@@ -650,16 +696,21 @@ class SANModel(nn.Module):
 
 
 # In[ ]:
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts, StepLR,  SequentialLR, LinearLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts, StepLR,  SequentialLR, LinearLR, CosineAnnealingLR
 from torch.utils.data import Subset
 import torch.optim as optim
 import time
 
 def train():
+    # Clear GPU cache
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
     train_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_train.pkl", 
-                           transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=1, pin_memory=True, persistent_workers=False)
+                           transform=train_transform)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=1, pin_memory=True, persistent_workers=True)
 
     # ratio = 0.3  
     # subset_size = int(len(train_dataset) * ratio)  
@@ -669,9 +720,9 @@ def train():
 
     val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
                            input_vqa="preprocessed_val.pkl", 
-                           transform=transform)
+                           transform=val_transform)
 
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=0, pin_memory=True, persistent_workers=False)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True)
 
     model_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
     log_dir = 'C:/Users/Baldu/Desktop/Temp/VQA/outputs'
@@ -685,8 +736,9 @@ def train():
     # ans_vocab_size = train_subdataset.dataset.ans_vocab.vocab_size
     # ans_unk_idx = train_subdataset.dataset.ans_vocab.unk2idx
 
-    use_saved_model = False
-    checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-100.pth" 
+    use_saved_model = True
+    checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/checkpoint-epoch-15.pth" 
+    # checkpoint_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/test_checkpoint-epoch-30.pth" 
     best_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model.pt"
     best_acc_model_path = "C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_acc_model.pt" 
 
@@ -699,8 +751,23 @@ def train():
         ans_vocab_size=ans_vocab_size,
         word_embed_size=300,
         num_layers=2,
-        hidden_size=256
+        hidden_size=256,
+        freeze_emb=False
     )
+
+    model.to(device)
+
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=5e-4)
+
+    criterion = nn.CrossEntropyLoss()
+    scheduler = StepLR(optimizer, step_size=1, gamma=0.8)  
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, min_lr=5e-5)
+    # scheduler = CosineAnnealingLR(optimizer, T_max=20, eta_min=5e-5)
+
+    # warmup_scheduler = LinearLR(optimizer, start_factor=0.2, total_iters=3)  
+    # main_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=5e-5)
+    # scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[3])
 
     if use_saved_model:
         try:
@@ -708,7 +775,7 @@ def train():
                 checkpoint = torch.load(checkpoint_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])  
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict']) 
-                start_epoch = checkpoint['epoch'] + 1  
+                start_epoch = checkpoint['epoch']  
                 prev_loss = checkpoint.get('loss', None)  
                 print(f"Resumed from epoch {start_epoch}, previous loss: {prev_loss:.4f}" if prev_loss else f"Resumed from epoch {start_epoch}")
             else:
@@ -724,43 +791,18 @@ def train():
         start_epoch = 0
         model.apply(init_weights)
 
-    model.to(device)
-
-    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-
-    # for param_group in optimizer.param_groups:
-    #     param_group['lr'] = 1e-3
-
-    #     model.apply(init_weights)
-
-    #     model.to(device)
-
-    # print("Sample Embedding Weights:", model.qst_encoder.word2vec.weight[:5, :10])
-    
-    # model = torch.compile(model)
-
-    criterion = nn.CrossEntropyLoss()
-    # scheduler = StepLR(optimizer, step_size=5, gamma=0.8)  
-    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, min_lr=5e-5)
-    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=5e-5)
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=3)  
-    main_scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2, eta_min=5e-5)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[3])
-
-
     last_time = 0
-    early_stop_threshold = 7
+    early_stop_threshold = 3
     best_loss = float("inf")
     best_acc = 0.0
     val_increase_count = 0
     stop_training = False
     prev_loss = float("inf")
-    num_epochs = 20
+    num_epochs = 5
     save_step = 5
 
     print("Starting training...")
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, start_epoch + num_epochs):
             if stop_training:
                 print(f"Early stopping triggered at epoch {epoch+1}")
                 break
@@ -771,6 +813,10 @@ def train():
 
                 running_loss = 0.0
                 running_corr = 0
+
+                # soft accuracy
+                running_soft_acc = 0
+                valid_soft_count = 0
 
                 if phase == 'train':
                     model.train()
@@ -785,15 +831,27 @@ def train():
                     question = batch_sample['question'].to(device)
                     label = batch_sample['answer_label'].to(device)
 
-
                     optimizer.zero_grad()
 
                     with torch.set_grad_enabled(phase == 'train'):
                         with torch.no_grad() if phase == 'valid' else torch.enable_grad():   
                             output = model(image, question)
 
-
                             _, pred = torch.max(output, 1)
+                            
+
+                            # soft accuracy metrics
+                            multi_choice = batch_sample['answer_multi_choice'].to(device)
+                            # print("Pred:", pred[0].item())
+                            # print("Valid Answers:", multi_choice[0].tolist())
+                            valid_mask = (multi_choice != -1)
+                            matches = (pred.unsqueeze(1) == multi_choice) & valid_mask
+                            soft_scores = torch.clamp(matches.sum(dim=1).float() / 3.0, max=1.0)
+                            # running_soft_acc += soft_scores.sum().item()
+
+                            valid_rows = valid_mask.any(dim=1) 
+                            running_soft_acc += soft_scores[valid_rows].sum().item()
+                            valid_soft_count += valid_rows.sum().item()
 
                             loss = criterion(output, label)
 
@@ -803,16 +861,15 @@ def train():
                             optimizer.step()
 
 
-
                     correct_predictions = (pred == label).sum().item()
                     running_corr += correct_predictions
                     running_loss += loss.item() * image.size(0)
-
+                    
                     # Print periodically for progress
                     if batch_idx % 100 == 0 and batch_idx > 0:
                         elapsed_time = time.time() - last_time
                         estimated_time = elapsed_time * (len(dataloader) - batch_idx) / 100
-                        print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
+                        print(f'| {phase.upper()} | Epoch [{epoch+1}/{start_epoch + num_epochs}], '
                               f'Batch [{batch_idx}/{len(dataloader)}], '
                               f'Loss: {loss.item():.4f}, '
                               f'Estimated time left: {estimated_time/3600:.2f} hr')
@@ -821,14 +878,20 @@ def train():
                 epoch_loss = running_loss / dataset_size
                 epoch_acc = running_corr / dataset_size
 
-                print(f'| {phase.upper()} | Epoch [{epoch+1}/{num_epochs}], '
-                      f'Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}\n')
+                # soft accuracy
+                # epoch_soft_acc = running_soft_acc / dataset_size
+                epoch_soft_acc = running_soft_acc / valid_soft_count
+
+                print(f'| {phase.upper()} | Epoch [{epoch+1}/{start_epoch + num_epochs}], '
+                      f'Loss: {epoch_loss:.4f}, Acc: {epoch_acc:.4f}, Soft Acc: {epoch_soft_acc:.4f}\n')
+                
+                print(f"Skipped {dataset_size - valid_soft_count} samples with all -1 answers.")
 
 
                 # Logging
                 log_file = os.path.join(log_dir, f'{phase}-log.txt')
                 with open(log_file, 'a') as f:
-                    f.write(f'Epoch {epoch+1}\tLoss: {epoch_loss:.4f}\tAcc: {epoch_acc:.4f}\n')
+                    f.write(f'Epoch {epoch+1}\tLoss: {epoch_loss:.4f}\tAcc: {epoch_acc:.4f}\tSoft Acc: {epoch_soft_acc:.4f}\n')
                 
                 if phase == 'train':  
                     scheduler.step()
@@ -842,11 +905,17 @@ def train():
 
                     if epoch_loss < best_loss:
                         best_loss = epoch_loss
-                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'test_best_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'test_best_model_0.2.pt'))
+                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_model_v2.pt'))
 
                     if epoch_acc > best_acc:
                         best_acc = epoch_acc
-                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_acc_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'best_acc_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'test_best_acc_model.pt'))
+                        # torch.save(model.state_dict(), os.path.join(model_dir, 'test_best_acc_model_0.2.pt'))
+                        torch.save(model.state_dict(), os.path.join(model_dir, 'best_acc_model_v2.pt'))
 
                     if epoch_loss > prev_loss:
                         val_increase_count += 1
@@ -858,8 +927,6 @@ def train():
 
                     prev_loss = epoch_loss
 
-
-
             # scheduler.step()
 
             if (epoch + 1) % save_step == 0:
@@ -869,10 +936,84 @@ def train():
                             'loss': epoch_loss
                         }, os.path.join(model_dir, f'checkpoint-epoch-{epoch+1:02d}.pth'))
                 print(f"Checkpoint saved at epoch {epoch + 1}")
+
+            # if (epoch + 1) % save_step == 0:
+            #     torch.save({
+            #         'epoch': epoch + 1,  
+            #         'model_state_dict': model.state_dict(),
+            #         'optimizer_state_dict': optimizer.state_dict(),
+            #         'loss': epoch_loss
+            #     }, os.path.join(model_dir, f'test_checkpoint-epoch-{epoch+1:02d}.pth'))
+            #     print(f"Test checkpoint saved at epoch {epoch + 1}")
             
 
 # In[ ]:
 if __name__ == '__main__':
     train()
 
+# In[ ]:
+from torch.utils.data import DataLoader
+from collections import defaultdict
+
+test_dataset = VqaDataset(
+    input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
+    input_vqa="preprocessed_test.pkl", 
+    transform=transform
+)
+
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = torch.load('C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model_v2.pt', map_location=device)
+
+def test_eval():
+    model.to(device)
+    model.eval()
+
+    total_soft_acc = 0
+    total_hard_acc = 0
+    valid_soft_count = 0
+    dataset_size = len(test_loader.dataset)
+
+    correct_by_type = defaultdict(int)
+    total_by_type = defaultdict(int)
+
+    with torch.no_grad():
+        for batch_sample in test_loader:
+            image = batch_sample['image'].to(device)
+            question = batch_sample['question'].to(device)
+            label = batch_sample['answer_label'].to(device)
+            multi_choice = batch_sample['answer_multi_choice'].to(device)
+            question_types = batch_sample['question_type'] 
+
+            output = model(image, question)
+            _, pred = torch.max(output, 1)
+
+            # Hard accuracy
+            total_hard_acc += (pred == label).sum().item()
+
+            # Soft accuracy
+            valid_mask = (multi_choice != -1)
+            matches = (pred.unsqueeze(1) == multi_choice) & valid_mask
+            soft_scores = torch.clamp(matches.sum(dim=1).float() / 3.0, max=1.0)
+            valid_rows = valid_mask.any(dim=1)
+            total_soft_acc += soft_scores[valid_rows].sum().item()
+            valid_soft_count += valid_rows.sum().item()
+
+            # Accuracy by question type
+            for i, q_type in enumerate(question_types):
+                total_by_type[q_type] += 1
+                if pred[i].item() == label[i].item():
+                    correct_by_type[q_type] += 1
+
+    avg_soft_acc = total_soft_acc / valid_soft_count
+    avg_acc = total_hard_acc / dataset_size
+
+    print(f"\nStrict Accuracy (Test Set): {avg_acc:.4f}")
+    print(f"Soft Accuracy (Test Set):   {avg_soft_acc:.4f}")
+
+    print("\nAccuracy by Question Type:")
+    for q_type in sorted(total_by_type.keys()):
+        acc = 100.0 * correct_by_type[q_type] / total_by_type[q_type]
+        print(f"{q_type.capitalize():<12}: {acc:.2f}%")
 

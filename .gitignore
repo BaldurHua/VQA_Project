@@ -8,4 +8,8 @@
 # Ignore saved models & checkpoints
 *.pth
 *.pt
+*.txt
+
+# MISC
+*.pptx
 checkpoints/
