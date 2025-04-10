@@ -114,8 +114,11 @@ class VqaDataset(Dataset):
         sample = {
             "image": image,
             "question": torch.tensor(qst2idc, dtype=torch.long),
-            # "question_type": vqa["question_type"]
+            
         }
+
+        if "question_type" in vqa:
+            sample["question_type"] = vqa["question_type"]
 
         # Process Answers
         if self.load_ans:
@@ -147,7 +150,8 @@ from torch.utils.data import DataLoader
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor()  
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  
 ])
 
 train_transform = transforms.Compose([
@@ -188,14 +192,15 @@ test_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/prepro
 # print(sample_batch.get("answer_label", None))
 
 # In[]:
-import matplotlib.pyplot as plt
-import torchvision.transforms as transforms
-from PIL import Image
-import random
+# import matplotlib.pyplot as plt
+# import torchvision.transforms as transforms
+# from PIL import Image
+# import random
 
-# Load a random sample
 # idx = random.randint(0, len(train_dataset) - 1)
-# raw_path = train_dataset.vqa[idx]["image_path"]
+# vqa = train_dataset.vqa[idx]
+
+# raw_path = vqa["image_path"]
 # raw_img = Image.open(raw_path).convert("RGB")
 # aug_img = train_transform(raw_img)
 
@@ -213,15 +218,11 @@ import random
 # plt.savefig("figure1_preprocessing.png")
 # plt.show()
 
-# In[ ]:
-# idx = random.randint(0, len(train_dataset) - 1)
-# vqa = train_dataset.vqa[idx]
 # token_ids = vqa["question_tokens"]
 # tokens = [train_dataset.qst_vocab.idx2word(i) for i in token_ids if i != 0] 
 # question = " ".join(tokens)
-# valid_answers = vqa["valid_answers"]
 
-# token_ids = [train_dataset.qst_vocab.word2idx(w) for w in tokens]
+# valid_answers = vqa["valid_answers"]
 # mapped_answers = [train_dataset.ans_vocab.word2idx(ans) for ans in valid_answers]
 
 # print(f"Q: {question}")
@@ -945,41 +946,65 @@ def train():
             #         'loss': epoch_loss
             #     }, os.path.join(model_dir, f'test_checkpoint-epoch-{epoch+1:02d}.pth'))
             #     print(f"Test checkpoint saved at epoch {epoch + 1}")
-            
 
-# In[ ]:
-if __name__ == '__main__':
-    train()
 
-# In[ ]:
-from torch.utils.data import DataLoader
-from collections import defaultdict
-
-test_dataset = VqaDataset(
-    input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
-    input_vqa="preprocessed_test.pkl", 
-    transform=transform
-)
-
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = torch.load('C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_model_v2.pt', map_location=device)
 
 def test_eval():
+    def group_question_type(raw_q_type):
+        q_type = raw_q_type.lower()
+        if q_type.startswith(("is", "are", "was", "does", "do", "can", "could", "has")):
+            return "Yes/No"
+        elif "how many" in q_type or "what number" in q_type:
+            return "Counting"
+        elif "what color" in q_type or "color of" in q_type:
+            return "Color"
+        elif any(q_type.startswith(x) for x in ["what is", "what are", "what kind", "what animal", "what brand", "what is this"]):
+            return "Object"
+        elif any(x in q_type for x in ["doing", "does", "why", "can", "could"]):
+            return "Action"
+        elif any(x in q_type for x in ["where", "room", "sport"]):
+            return "Location"
+        elif "what time" in q_type:
+            return "Temporal"
+        else:
+            return "Other"
+        
+    from torch.utils.data import DataLoader
+    from collections import defaultdict
+
+    val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
+                           input_vqa="preprocessed_val.pkl", 
+                           transform=val_transform)
+
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=1, pin_memory=True, persistent_workers=True)
+    ans_vocab_size = val_dataset.ans_vocab.vocab_size
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SANModel(
+        embed_size=512, 
+        qst_vocab=VocabDict('C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed/vocab_questions.txt'),
+        ans_vocab_size=ans_vocab_size,
+        word_embed_size=300,
+        num_layers=2,
+        hidden_size=256,
+        freeze_emb=False
+    )
+    state_dict = torch.load('C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_acc_model_v2.pt', map_location=device)
+    model.load_state_dict(state_dict)
+
     model.to(device)
     model.eval()
 
     total_soft_acc = 0
     total_hard_acc = 0
     valid_soft_count = 0
-    dataset_size = len(test_loader.dataset)
+    dataset_size = len(val_loader.dataset)
 
     correct_by_type = defaultdict(int)
     total_by_type = defaultdict(int)
 
     with torch.no_grad():
-        for batch_sample in test_loader:
+        for batch_sample in val_loader:
             image = batch_sample['image'].to(device)
             question = batch_sample['question'].to(device)
             label = batch_sample['answer_label'].to(device)
@@ -1002,9 +1027,10 @@ def test_eval():
 
             # Accuracy by question type
             for i, q_type in enumerate(question_types):
-                total_by_type[q_type] += 1
+                general_type = group_question_type(q_type)
+                total_by_type[general_type] += 1
                 if pred[i].item() == label[i].item():
-                    correct_by_type[q_type] += 1
+                    correct_by_type[general_type] += 1
 
     avg_soft_acc = total_soft_acc / valid_soft_count
     avg_acc = total_hard_acc / dataset_size
@@ -1012,8 +1038,76 @@ def test_eval():
     print(f"\nStrict Accuracy (Test Set): {avg_acc:.4f}")
     print(f"Soft Accuracy (Test Set):   {avg_soft_acc:.4f}")
 
-    print("\nAccuracy by Question Type:")
-    for q_type in sorted(total_by_type.keys()):
-        acc = 100.0 * correct_by_type[q_type] / total_by_type[q_type]
-        print(f"{q_type.capitalize():<12}: {acc:.2f}%")
+    print("\nAccuracy by Question Category:")
+    for cat in sorted(total_by_type.keys()):
+        acc = 100.0 * correct_by_type[cat] / total_by_type[cat]
+        print(f"{cat:<12}: {acc:.2f}%")
+
+def proba_eval():
+    from matplotlib import pyplot as plt
+    from torchvision.transforms import ToPILImage
+
+    val_dataset = VqaDataset(input_dir="C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed", 
+                           input_vqa="preprocessed_val.pkl", 
+                           transform=val_transform)
+
+    ans_vocab_size = val_dataset.ans_vocab.vocab_size
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SANModel(
+        embed_size=512, 
+        qst_vocab=VocabDict('C:/Users/Baldu/Desktop/Temp/VQA/data/preprocessed/vocab_questions.txt'),
+        ans_vocab_size=ans_vocab_size,
+        word_embed_size=300,
+        num_layers=2,
+        hidden_size=256,
+        freeze_emb=False
+    )
+    state_dict = torch.load('C:/Users/Baldu/Desktop/Temp/VQA/outputs/best_acc_model_v2.pt', map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+
+    idx = 15  
+
+    sample = val_dataset[idx]
+    image = sample["image"].unsqueeze(0).to(device)  
+    question = sample["question"].unsqueeze(0).to(device)
+
+    model.eval()
+    with torch.no_grad():
+        output = model(image, question) 
+        probs = F.softmax(output, dim=1).squeeze(0)  
+
+    topk = 10
+    top_probs, top_indices = torch.topk(probs, topk)
+
+    ans_vocab = val_dataset.ans_vocab
+    top_answers = [ans_vocab.idx2word(idx.item()) for idx in top_indices]
+
+    print(f"Question: {' '.join([val_dataset.qst_vocab.idx2word(i.item()) for i in sample['question'] if i.item() != 0])}")
+    print("\nTop Predicted Answers:")
+    for ans, prob in zip(top_answers, top_probs):
+        print(f"{ans:<20}: {prob.item():.4f}")
+
+    # raw image
+    raw_path = val_dataset.vqa[idx]["image_path"]
+    raw_img = Image.open(raw_path).convert("RGB")
+    raw_img.show()
+           
+
+# In[ ]:
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'proba'], help="Run mode: 'train' or 'test' or 'probability'")
+    args = parser.parse_args()
+
+    if args.mode == 'train':
+        train()
+    elif args.mode == 'test':
+        test_eval()
+    elif args.mode == 'proba':
+        proba_eval()
+
+# In[ ]:
 

@@ -1,11 +1,18 @@
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Base64;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.net.http.*;
@@ -14,8 +21,10 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+
 
 public class GUI {
     private JFrame frame;
@@ -139,38 +148,62 @@ public class GUI {
 
         String question = questionField.getText();
         try {
-            byte[] imageBytes = Files.readAllBytes(Paths.get(selectedFile.getAbsolutePath()));
-            String base64Image = Base64.getEncoder().encodeToString(imageBytes);
-            String response = callVQAModel(base64Image, question);
+            String response = callVQAModel(selectedFile, question);
             answerLabel.setText("Answer: " + response);
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
+            answerLabel.setText("Error communicating with the model.");
         }
     }
 
-    private String callVQAModel(String base64Image, String question) {
+    private String callVQAModel(File imageFile, String question) {
         try {
-            HttpClient client = HttpClient.newHttpClient();
-
-            String formData = "image_base64=" + URLEncoder.encode(base64Image, StandardCharsets.UTF_8) +
-                              "&question=" + URLEncoder.encode(question, StandardCharsets.UTF_8);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:8000/vqa/"))
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .POST(BodyPublishers.ofString(formData))
-                    .build();
-
-            HttpResponse<String> response = client.send(request, BodyHandlers.ofString());
-
-            if (response.statusCode() == 200) {
-                JSONObject jsonResponse = new JSONObject(response.body());
-                return jsonResponse.getString("answer");
+            String boundary = Long.toHexString(System.currentTimeMillis());
+            URL url = new URL("http://127.0.0.1:8000/vqa/");
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setDoOutput(true);
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+    
+            OutputStream output = connection.getOutputStream();
+            PrintWriter writer = new PrintWriter(new OutputStreamWriter(output, "UTF-8"), true);
+    
+            // --- Send text field (question)
+            writer.append("--" + boundary).append("\r\n");
+            writer.append("Content-Disposition: form-data; name=\"question\"").append("\r\n");
+            writer.append("Content-Type: text/plain; charset=UTF-8").append("\r\n\r\n");
+            writer.append(question).append("\r\n");
+            writer.flush();
+    
+            // --- Send file (image)
+            writer.append("--" + boundary).append("\r\n");
+            writer.append("Content-Disposition: form-data; name=\"image\"; filename=\"" + imageFile.getName() + "\"").append("\r\n");
+            writer.append("Content-Type: image/jpeg").append("\r\n\r\n");
+            writer.flush();
+            Files.copy(imageFile.toPath(), output);
+            output.flush();
+            writer.append("\r\n");
+            writer.flush();
+    
+            // --- End of multipart
+            writer.append("--" + boundary + "--").append("\r\n");
+            writer.close();
+    
+            int responseCode = connection.getResponseCode();
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                BufferedReader in = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = in.readLine()) != null) {
+                    response.append(line);
+                }
+                in.close();
+                JSONObject jsonResponse = new JSONObject(response.toString());
+                JSONArray predictions = jsonResponse.getJSONArray("predictions");
+                return predictions.getJSONObject(0).getString("answer"); // Top answer
             } else {
-                System.out.println("Response: " + response.body());
-                return "Error: Status " + response.statusCode();
+                return "Error: Server returned status " + responseCode;
             }
-
         } catch (Exception e) {
             e.printStackTrace();
             return "Error connecting to VQA model.";

@@ -76,18 +76,22 @@ class VqaDataset(Dataset):
         sample = {
             "image": image,
             "question": torch.tensor(qst2idc, dtype=torch.long),
+            
         }
+
+        if "question_type" in vqa:
+            sample["question_type"] = vqa["question_type"]
 
         # Process Answers
         if self.load_ans:
             sample["answer_label"] = torch.tensor(vqa["answer_label"], dtype=torch.long)
 
-            # Multi-choice 
             MAX_ANSWERS = 10
             answer_multi_choice = vqa.get("valid_answers", [])
-            
+
             if len(answer_multi_choice) < MAX_ANSWERS:
-                answer_multi_choice += [0] * (MAX_ANSWERS - len(answer_multi_choice))
+                # answer_multi_choice += [0] * (MAX_ANSWERS - len(answer_multi_choice))
+                answer_multi_choice += [-1] * (MAX_ANSWERS - len(answer_multi_choice))
             else:
                 answer_multi_choice = answer_multi_choice[:MAX_ANSWERS]
 
