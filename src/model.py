@@ -62,7 +62,8 @@ class VocabDict:
         self.word_list = load_str_list(vocab_file)
         self.word2idx_dict = {w:n_w for n_w, w in enumerate(self.word_list)}
         self.vocab_size = len(self.word_list)
-        self.unk2idx = self.word2idx_dict[''] if '' in self.word2idx_dict else None
+        # self.unk2idx = self.word2idx_dict[''] if '' in self.word2idx_dict else None
+        self.unk2idx = self.word2idx_dict.get("<unk>")
 
     def idx2word(self, n_w):
 
